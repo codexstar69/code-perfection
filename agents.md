@@ -170,6 +170,56 @@ const orders = await fetchOrders();
 const [users, orders] = await Promise.all([fetchUsers(), fetchOrders()]);
 ```
 
+### error handling
+
+- Let errors propagate naturally. Only catch errors when you can do something meaningful with them.
+- Prefer typed errors over generic `Error`. Use custom error classes or result types for expected failure modes.
+- Never catch and ignore. If you catch, log, rethrow, or handle — never silently swallow.
+- Distinguish between programmer errors (bugs — let them crash) and operational errors (expected failures — handle gracefully).
+
+```ts
+// bad — catches everything, hides bugs
+try {
+  return processOrder(order);
+} catch {
+  return null;
+}
+
+// good — handles specific expected failure
+try {
+  return processOrder(order);
+} catch (error) {
+  if (error instanceof InsufficientFundsError) {
+    return { status: 'declined', reason: error.message };
+  }
+  throw error; // unexpected errors propagate
+}
+```
+
+### validation boundaries
+
+- Validate at the edges: API handlers, CLI parsers, file readers, message consumers.
+- Once data crosses the boundary and is validated, trust the types. Do not re-validate internally.
+- Use parsing (transform + validate) over validation (check + assert). Parse once, use the parsed type everywhere.
+
+```ts
+// bad — validate at every layer
+function createUser(data: unknown) {
+  if (!data || typeof data !== 'object') throw new Error('invalid');
+  // ...more manual checks
+}
+
+// good — parse at the boundary, trust the type after
+const CreateUserSchema = z.object({ name: z.string(), email: z.string().email() });
+type CreateUser = z.infer<typeof CreateUserSchema>;
+
+function handleRequest(raw: unknown) {
+  const data = CreateUserSchema.parse(raw); // boundary
+  return createUser(data); // typed, no further validation needed
+}
+function createUser(data: CreateUser) { /* trust the type */ }
+```
+
 ### security
 
 - Never interpolate user input directly into SQL, shell commands, or HTML.
