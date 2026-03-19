@@ -361,3 +361,16 @@ if (retries > MAX_RETRIES) throw new Error('too many retries');
 - Keep the diff tight.
 - Briefly explain any non-obvious change.
 - If a refactoring changes more than 50 lines, break it into smaller, independently correct steps.
+
+## verification checklist
+
+Run through this checklist after every change. Do not skip steps.
+
+1. **Compiles** — the code builds without errors or new warnings.
+2. **Tests pass** — all existing tests pass without modification.
+3. **Behavior preserved** — every call site produces the same observable output for the same input.
+4. **No new `any`** — no `any` types introduced. If one was removed, confirm the replacement is correct.
+5. **No dead code introduced** — no orphaned functions, unused imports, or unreachable branches.
+6. **No scope creep** — the diff contains only changes required by the task.
+7. **Naming consistent** — any new names match the conventions already present in the file.
+8. **No secrets exposed** — no credentials, keys, or tokens in the diff.
