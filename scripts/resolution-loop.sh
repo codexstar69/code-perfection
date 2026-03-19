@@ -172,7 +172,7 @@ for issue in data['issues']:
         print(issue['description'])
         break
 ")
-    git add -A
+    git add --all -- ':!.codeperfect'
     git commit -m "fix(codeperfect): $id — $desc" --allow-empty-message 2>/dev/null || true
   fi
 
