@@ -27,7 +27,7 @@ const HOME = os.homedir();
 const AGENTS = [
   { name: 'claude-code', skillDir: path.join(HOME, '.claude', 'skills', SKILL_NAME), cmdDir: path.join(HOME, '.claude', 'commands', SKILL_NAME) },
   { name: 'codex',       skillDir: path.join(HOME, '.codex', 'skills', SKILL_NAME),  cmdDir: path.join(HOME, '.codex', 'commands', SKILL_NAME) },
-  { name: 'pi',          skillDir: path.join(HOME, '.agents', 'skills', SKILL_NAME), cmdDir: path.join(HOME, '.agents', 'commands', SKILL_NAME) },
+  // Pi uses `pi install ./pi-extension` — not this installer. Skipped to avoid duplicates with ~/.agents/
   { name: 'cursor',      skillDir: path.join(HOME, '.cursor', 'skills', SKILL_NAME), cmdDir: path.join(HOME, '.cursor', 'commands', SKILL_NAME) },
   { name: 'kiro',        skillDir: path.join(HOME, '.kiro', 'skills', SKILL_NAME),   cmdDir: path.join(HOME, '.kiro', 'commands', SKILL_NAME) },
 ];
