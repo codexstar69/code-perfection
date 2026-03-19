@@ -291,12 +291,14 @@ if (retries > MAX_RETRIES) throw new Error('too many retries');
 
 ### before writing code
 
-- Read the existing code first.
+- Read the existing code first. Understand what it does and why before changing it.
+- Identify all call sites of any function or type you plan to modify.
 - Match the project's naming, file structure, and coding patterns.
 - Check `package.json`, `tsconfig.json`, and nearby code before assuming anything about the stack.
 - Check existing imports before adding new ones.
 - Do not add dependencies unless explicitly asked.
 - If a new dependency seems necessary, say so instead of adding it.
+- Run existing tests to establish a passing baseline before making changes.
 
 ### while writing code
 
