@@ -4,41 +4,29 @@
 # Usage: scripts/audit-state.sh <command> [args...]
 set -euo pipefail
 
-# Dependency check
-if ! command -v python3 &>/dev/null; then
-  printf "ERROR: python3 is required but not found in PATH.\n" >&2
-  exit 1
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_lib.sh"
 
-STATE_DIR=".codeperfect"
-AUDIT_STATE="$STATE_DIR/audit-state.json"
-TRIAGE_FILE="$STATE_DIR/triage.json"
+check_python3
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-ensure_state_dir() {
-  mkdir -p "$STATE_DIR" "$STATE_DIR/domains"
-}
+# --- Commands ---
 
 cmd_init() {
   local target="${1:-.}"
   ensure_state_dir
 
   if [ ! -f "$TRIAGE_FILE" ]; then
-    printf "${RED}ERROR${NC}: Run scripts/triage.sh first to generate %s\n" "$TRIAGE_FILE"
-    exit 1
+    die "Run scripts/triage.sh first to generate $TRIAGE_FILE"
   fi
 
   local timestamp
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  timestamp="$(utc_timestamp)"
   CP_TRIAGE="$TRIAGE_FILE" CP_TARGET="$target" CP_AUDIT_STATE="$AUDIT_STATE" \
   CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os
+
 with open(os.environ['CP_TRIAGE']) as f:
     triage = json.load(f)
 
@@ -65,30 +53,25 @@ for domain in triage.get('domains', []):
         'issues_deferred': 0
     }
 
-out = os.environ['CP_AUDIT_STATE']
-tmp = out + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(state, f, indent=2)
-os.replace(tmp, out)
+atomic_json_write_with_backup(os.environ['CP_AUDIT_STATE'], state)
 print(f'Initialized audit state: {len(state[\"domains\"])} domains')
 "
-  printf "${GREEN}Audit state${NC} initialized at %s\n" "$AUDIT_STATE"
+  ok_msg "Audit state initialized at $AUDIT_STATE"
 }
 
 cmd_status() {
   if [ ! -f "$AUDIT_STATE" ]; then
-    printf "${RED}ERROR${NC}: No audit state found. Run: scripts/audit-state.sh init <target>\n"
-    exit 1
+    die "No audit state found. Run: scripts/audit-state.sh init <target>"
   fi
 
   CP_AUDIT_STATE="$AUDIT_STATE" python3 -c "
 import json, os
+
 with open(os.environ['CP_AUDIT_STATE']) as f:
     state = json.load(f)
 
 domains = state['domains']
 boundaries = state.get('boundaries', {})
-
 tier_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
 
 print('=== Audit Progress ===')
@@ -113,138 +96,126 @@ if boundaries:
 
 cmd_next_domain() {
   if [ ! -f "$AUDIT_STATE" ]; then
-    printf "${RED}ERROR${NC}: No audit state found.\n"
-    exit 1
+    die "No audit state found."
   fi
 
-  CP_AUDIT_STATE="$AUDIT_STATE" python3 -c "
-import json, os, sys
+  # Pure-bash fast path: check for in_progress first
+  if json_has_status "$AUDIT_STATE" "in_progress"; then
+    # Need python to extract the domain name
+    CP_AUDIT_STATE="$AUDIT_STATE" python3 -c "
+import json, os
 with open(os.environ['CP_AUDIT_STATE']) as f:
     state = json.load(f)
-
-# Check for in-progress domain first
 for name, d in state['domains'].items():
     if d['status'] == 'in_progress':
         print(f'RESUME: {name} (already in progress)')
-        sys.exit(0)
+        break
+"
+    return 0
+  fi
 
-# Find next pending domain by tier priority
+  # Check if any pending domains exist (pure bash)
+  if ! json_has_status "$AUDIT_STATE" "pending"; then
+    echo "ALL_DOMAINS_DONE"
+    return 0
+  fi
+
+  # Need python for tier-priority sorting
+  CP_AUDIT_STATE="$AUDIT_STATE" python3 -c "
+import json, os
+with open(os.environ['CP_AUDIT_STATE']) as f:
+    state = json.load(f)
 tier_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
 pending = [(name, d) for name, d in state['domains'].items() if d['status'] == 'pending']
 pending.sort(key=lambda x: (tier_order.get(x[1].get('tier','low'), 99), x[0]))
-
 if pending:
     print(f'NEXT: {pending[0][0]} (tier: {pending[0][1].get(\"tier\",\"unknown\")})')
-    sys.exit(0)
-else:
-    print('ALL_DOMAINS_DONE')
-    sys.exit(0)
 "
 }
 
 cmd_start_domain() {
   if [ $# -lt 1 ]; then
-    printf "${RED}ERROR${NC}: start-domain requires 1 argument: <name>\n" >&2
-    exit 1
+    die "start-domain requires 1 argument: <name>"
   fi
   local name="$1"
   local timestamp
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  timestamp="$(utc_timestamp)"
 
   CP_AUDIT_STATE="$AUDIT_STATE" CP_NAME="$name" CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 audit_state = os.environ['CP_AUDIT_STATE']
 domain_name = os.environ['CP_NAME']
 timestamp = os.environ['CP_TIMESTAMP']
-with open(audit_state) as f:
-    state = json.load(f)
+data, _ = safe_json_load(audit_state)
 
 # Check no other domain is in_progress
-for dname, d in state['domains'].items():
+for dname, d in data['domains'].items():
     if d['status'] == 'in_progress' and dname != domain_name:
         print(f'ERROR: Domain {dname} is already in_progress. Complete it first.')
         sys.exit(1)
 
-if domain_name not in state['domains']:
+if domain_name not in data['domains']:
     print(f'ERROR: Domain {domain_name} not found in audit state')
     sys.exit(1)
 
-if state['domains'][domain_name]['status'] == 'done':
+if data['domains'][domain_name]['status'] == 'done':
     print(f'ERROR: Domain {domain_name} is already done. Use --force to re-audit.')
     sys.exit(1)
 
-state['domains'][domain_name]['status'] = 'in_progress'
-state['last_updated'] = timestamp
-tmp = audit_state + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(state, f, indent=2)
-os.replace(tmp, audit_state)
+data['domains'][domain_name]['status'] = 'in_progress'
+data['last_updated'] = timestamp
+atomic_json_write_with_backup(audit_state, data)
 print(f'Started domain: {domain_name}')
 "
-  printf "${CYAN}Started${NC} domain: %s\n" "$name"
-
-  # Initialize resolution loop for this domain
+  info_msg "Started domain: $name"
   mkdir -p "$STATE_DIR/domains/$name"
 }
 
 cmd_complete_domain() {
   if [ $# -lt 1 ]; then
-    printf "${RED}ERROR${NC}: complete-domain requires 1 argument: <name>\n" >&2
-    exit 1
+    die "complete-domain requires 1 argument: <name>"
   fi
   local name="$1"
 
-  # Read resolution loop results if they exist
-  local issues_found=0
-  local issues_resolved=0
-  local issues_deferred=0
+  # Read resolution loop results (pure bash for basic counts)
+  local issues_found=0 issues_resolved=0 issues_deferred=0
 
-  if [ -f "$STATE_DIR/issues.json" ]; then
-    read -r issues_found issues_resolved issues_deferred < <(CP_ISSUES="$STATE_DIR/issues.json" python3 -c "
-import json, os
-with open(os.environ['CP_ISSUES']) as f:
-    data = json.load(f)
-issues = data['issues']
-total = len(issues)
-done = sum(1 for i in issues if i['status'] == 'done')
-deferred = sum(1 for i in issues if i['status'] == 'deferred')
-print(f'{total} {done} {deferred}')
-" 2>/dev/null || echo "0 0 0")
-
+  if [ -f "$ISSUES_FILE" ]; then
+    issues_found=$(json_count_issues "$ISSUES_FILE")
+    issues_resolved=$(json_count_by_status "$ISSUES_FILE" "done")
+    issues_deferred=$(json_count_by_status "$ISSUES_FILE" "deferred")
     # Archive domain issues
-    cp "$STATE_DIR/issues.json" "$STATE_DIR/domains/$name/issues.json" 2>/dev/null || true
+    cp "$ISSUES_FILE" "$STATE_DIR/domains/$name/issues.json" 2>/dev/null || true
   fi
 
   local timestamp
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  timestamp="$(utc_timestamp)"
   CP_AUDIT_STATE="$AUDIT_STATE" CP_NAME="$name" CP_TIMESTAMP="$timestamp" \
   CP_FOUND="$issues_found" CP_RESOLVED="$issues_resolved" CP_DEFERRED="$issues_deferred" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 audit_state = os.environ['CP_AUDIT_STATE']
 domain_name = os.environ['CP_NAME']
-with open(audit_state) as f:
-    state = json.load(f)
+data, _ = safe_json_load(audit_state)
 
-if domain_name not in state['domains']:
+if domain_name not in data['domains']:
     print(f'ERROR: Domain {domain_name} not found in audit state')
     sys.exit(1)
-if state['domains'][domain_name]['status'] != 'in_progress':
-    print(f'ERROR: Domain {domain_name} has status \"{state[\"domains\"][domain_name][\"status\"]}\" — must be in_progress to complete')
+if data['domains'][domain_name]['status'] != 'in_progress':
+    print(f'ERROR: Domain {domain_name} has status \"{data[\"domains\"][domain_name][\"status\"]}\" — must be in_progress to complete')
     sys.exit(1)
 
-state['domains'][domain_name]['status'] = 'done'
-state['domains'][domain_name]['issues_found'] = int(os.environ['CP_FOUND'])
-state['domains'][domain_name]['issues_resolved'] = int(os.environ['CP_RESOLVED'])
-state['domains'][domain_name]['issues_deferred'] = int(os.environ['CP_DEFERRED'])
-state['total_resolved'] = sum(d['issues_resolved'] for d in state['domains'].values())
-state['total_deferred'] = sum(d['issues_deferred'] for d in state['domains'].values())
-state['last_updated'] = os.environ['CP_TIMESTAMP']
-tmp = audit_state + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(state, f, indent=2)
-os.replace(tmp, audit_state)
+data['domains'][domain_name]['status'] = 'done'
+data['domains'][domain_name]['issues_found'] = int(os.environ['CP_FOUND'])
+data['domains'][domain_name]['issues_resolved'] = int(os.environ['CP_RESOLVED'])
+data['domains'][domain_name]['issues_deferred'] = int(os.environ['CP_DEFERRED'])
+data['total_resolved'] = sum(d['issues_resolved'] for d in data['domains'].values())
+data['total_deferred'] = sum(d['issues_deferred'] for d in data['domains'].values())
+data['last_updated'] = os.environ['CP_TIMESTAMP']
+atomic_json_write_with_backup(audit_state, data)
 "
   printf "${GREEN}Completed${NC} domain: %s (found=%d resolved=%d deferred=%d)\n" \
     "$name" "$issues_found" "$issues_resolved" "$issues_deferred"
@@ -254,47 +225,40 @@ cmd_find_boundaries() {
   local target="${1:-.}"
 
   if [ ! -f "$AUDIT_STATE" ]; then
-    printf "${RED}ERROR${NC}: No audit state found.\n"
-    exit 1
+    die "No audit state found."
   fi
 
-  printf "${CYAN}Discovering${NC} cross-domain boundaries in %s...\n" "$target"
+  info_msg "Discovering cross-domain boundaries in $target..."
 
   local timestamp
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  timestamp="$(utc_timestamp)"
   CP_AUDIT_STATE="$AUDIT_STATE" CP_TARGET="$target" CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, re
 
 audit_state = os.environ['CP_AUDIT_STATE']
 target = os.environ['CP_TARGET']
 timestamp = os.environ['CP_TIMESTAMP']
 
-with open(audit_state) as f:
-    state = json.load(f)
-
-domain_names = list(state['domains'].keys())
+data, _ = safe_json_load(audit_state)
+domain_names = list(data['domains'].keys())
 boundaries = {}
 
-# Pre-compile regex patterns for each domain to avoid recompilation per file
-SOURCE_EXTS = frozenset(('.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs'))
-SKIP_DIRS = frozenset(('node_modules', 'dist', 'build', '.git', '__pycache__', '.venv', '.codeperfect'))
+# Pre-compile patterns for each domain pair (scalability: avoid recompiling per file)
 domain_patterns = {}
-for d in domain_names:
-    escaped = re.escape(d)
-    domain_patterns[d] = re.compile(
-        rf'(?:from\s+[\"\\x27]|import\s+.*[\"\\x27]|require\([\"\\x27]).*{escaped}'
+for other in domain_names:
+    domain_patterns[other] = re.compile(
+        rf'(?:from\s+[\"\\x27].*{re.escape(other)}|import\s+.*[\"\\x27].*{re.escape(other)}|require\([\"\\x27].*{re.escape(other)})'
     )
 
-# Pre-compute domain path prefixes for fast lookup
-domain_prefixes = [(d, os.path.join(target, d) + os.sep) for d in domain_names]
+SOURCE_EXTS = {'.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs'}
+SKIP_DIRS = {'node_modules', 'dist', 'build', '.git', '__pycache__', '.venv', 'vendor', '.next', 'coverage', '.codeperfect'}
 
-# Scan for cross-domain imports
 for root, dirs, files in os.walk(target):
     dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
     for fname in files:
-        ext = os.path.splitext(fname)[1]
-        if ext not in SOURCE_EXTS:
+        if os.path.splitext(fname)[1] not in SOURCE_EXTS:
             continue
         fpath = os.path.join(root, fname)
         try:
@@ -303,16 +267,16 @@ for root, dirs, files in os.walk(target):
         except Exception:
             continue
 
-        # Find which domain this file belongs to using prefix match
+        # Find which domain this file belongs to
         file_domain = None
-        for d, prefix in domain_prefixes:
-            if fpath.startswith(prefix):
+        for d in domain_names:
+            if fpath.startswith(os.path.join(target, d)) or ('/' + d + '/') in fpath:
                 file_domain = d
                 break
         if not file_domain:
             continue
 
-        # Find imports that reference other domains using pre-compiled patterns
+        # Check for cross-domain imports
         for other in domain_names:
             if other == file_domain:
                 continue
@@ -323,76 +287,70 @@ for root, dirs, files in os.walk(target):
                 if fpath not in boundaries[key]['files']:
                     boundaries[key]['files'].append(fpath)
 
-state['boundaries'] = boundaries
-state['last_updated'] = timestamp
-tmp = audit_state + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(state, f, indent=2)
-os.replace(tmp, audit_state)
+data['boundaries'] = boundaries
+data['last_updated'] = timestamp
+atomic_json_write_with_backup(audit_state, data)
 
 print(f'Found {len(boundaries)} boundary pairs:')
 for key, b in sorted(boundaries.items()):
     print(f'  {key}: {len(b[\"files\"])} boundary files')
-" 2>/dev/null || printf "${YELLOW}WARN${NC}: Boundary detection requires Python3\n"
+" 2>/dev/null || warn_msg "Boundary detection encountered an error"
 }
 
 cmd_start_boundary() {
   if [ $# -lt 1 ]; then
-    printf "${RED}ERROR${NC}: start-boundary requires 1 argument: <pair>\n" >&2
-    exit 1
+    die "start-boundary requires 1 argument: <pair>"
   fi
   local pair="$1"
   local timestamp
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  timestamp="$(utc_timestamp)"
   CP_AUDIT_STATE="$AUDIT_STATE" CP_PAIR="$pair" CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 audit_state = os.environ['CP_AUDIT_STATE']
 pair = os.environ['CP_PAIR']
-with open(audit_state) as f:
-    state = json.load(f)
-if pair not in state.get('boundaries', {}):
+data, _ = safe_json_load(audit_state)
+if pair not in data.get('boundaries', {}):
     print(f'ERROR: Boundary {pair} not found')
     sys.exit(1)
-state['boundaries'][pair]['status'] = 'in_progress'
-state['last_updated'] = os.environ['CP_TIMESTAMP']
-tmp = audit_state + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(state, f, indent=2)
-os.replace(tmp, audit_state)
+data['boundaries'][pair]['status'] = 'in_progress'
+data['last_updated'] = os.environ['CP_TIMESTAMP']
+atomic_json_write_with_backup(audit_state, data)
 "
-  printf "${CYAN}Started${NC} boundary audit: %s\n" "$pair"
+  info_msg "Started boundary audit: $pair"
 }
 
 cmd_complete_boundary() {
   if [ $# -lt 1 ]; then
-    printf "${RED}ERROR${NC}: complete-boundary requires 1 argument: <pair>\n" >&2
-    exit 1
+    die "complete-boundary requires 1 argument: <pair>"
   fi
   local pair="$1"
   local timestamp
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  timestamp="$(utc_timestamp)"
   CP_AUDIT_STATE="$AUDIT_STATE" CP_PAIR="$pair" CP_TIMESTAMP="$timestamp" \
   python3 -c "
-import json, os
+${ATOMIC_WRITE_PY}
+import json, os, sys
 audit_state = os.environ['CP_AUDIT_STATE']
 pair = os.environ['CP_PAIR']
-with open(audit_state) as f:
-    state = json.load(f)
-state['boundaries'][pair]['status'] = 'done'
-state['last_updated'] = os.environ['CP_TIMESTAMP']
-tmp = audit_state + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(state, f, indent=2)
-os.replace(tmp, audit_state)
+data, _ = safe_json_load(audit_state)
+if pair not in data.get('boundaries', {}):
+    print(f'ERROR: Boundary {pair} not found')
+    sys.exit(1)
+if data['boundaries'][pair]['status'] != 'in_progress':
+    print(f'ERROR: Boundary {pair} has status \"{data[\"boundaries\"][pair][\"status\"]}\" — must be in_progress to complete')
+    sys.exit(1)
+data['boundaries'][pair]['status'] = 'done'
+data['last_updated'] = os.environ['CP_TIMESTAMP']
+atomic_json_write_with_backup(audit_state, data)
 "
-  printf "${GREEN}Completed${NC} boundary: %s\n" "$pair"
+  ok_msg "Completed boundary: $pair"
 }
 
 cmd_report() {
   if [ ! -f "$AUDIT_STATE" ]; then
-    printf "${RED}ERROR${NC}: No audit state found.\n"
-    exit 1
+    die "No audit state found."
   fi
 
   local report_file="$STATE_DIR/audit-report.md"
@@ -433,7 +391,6 @@ if boundaries:
         lines.append(f'| {key} | {b[\"status\"]} | {len(b.get(\"files\",[]))} |')
     lines.append('')
 
-# Coverage assessment
 all_done = all(d['status'] == 'done' for d in domains.values())
 all_boundaries_done = all(b['status'] == 'done' for b in boundaries.values()) if boundaries else True
 
@@ -454,7 +411,7 @@ else:
 print('\n'.join(lines))
 " > "$report_file"
 
-  printf "${GREEN}Report${NC} written to %s\n" "$report_file"
+  ok_msg "Report written to $report_file"
   cat "$report_file"
 }
 
@@ -463,15 +420,15 @@ cmd_merge_findings() {
   local findings_dir="$STATE_DIR"
   local merged_file="$STATE_DIR/merged-findings.json"
 
-  printf "${CYAN}Merging${NC} parallel agent findings...\n"
+  info_msg "Merging parallel agent findings..."
 
   CP_DIR="$findings_dir" CP_OUT="$merged_file" python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, glob
 
 findings_dir = os.environ['CP_DIR']
 output_file = os.environ['CP_OUT']
 
-# Find all *-findings.json files
 pattern = os.path.join(findings_dir, '*-findings.json')
 finding_files = glob.glob(pattern)
 
@@ -480,7 +437,7 @@ if not finding_files:
     import sys; sys.exit(1)
 
 all_issues = []
-seen = set()  # deduplicate by (file, line, description)
+seen = set()
 
 for fpath in sorted(finding_files):
     try:
@@ -501,17 +458,13 @@ merged = {
     'issues': all_issues
 }
 
-tmp = output_file + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(merged, f, indent=2)
-os.replace(tmp, output_file)
-
+atomic_json_write_with_backup(output_file, merged)
 print(f'Merged {len(all_issues)} unique issues from {len(finding_files)} files')
 print(f'Written to {output_file}')
 "
 }
 
-# Dispatch
+# --- Dispatch ---
 case "${1:-help}" in
   init)              shift; cmd_init "$@" ;;
   status)            cmd_status ;;
@@ -524,17 +477,20 @@ case "${1:-help}" in
   merge-findings)    cmd_merge_findings ;;
   report)            cmd_report ;;
   help|*)
-    printf "Usage: scripts/audit-state.sh <command> [args...]\n\n"
-    printf "Commands:\n"
-    printf "  init [target]                 Initialize audit from triage.json\n"
-    printf "  status                        Show audit progress\n"
-    printf "  next-domain                   Get next domain to audit\n"
-    printf "  start-domain <name>           Mark domain as in-progress\n"
-    printf "  complete-domain <name>        Mark domain as done\n"
-    printf "  find-boundaries [target]      Discover cross-domain boundaries\n"
-    printf "  start-boundary <pair>         Start boundary audit\n"
-    printf "  complete-boundary <pair>      Complete boundary audit\n"
-    printf "  merge-findings                Merge parallel agent findings\n"
-    printf "  report                        Generate final audit report\n"
+    cat <<'USAGE'
+Usage: scripts/audit-state.sh <command> [args...]
+
+Commands:
+  init [target]                 Initialize audit from triage.json
+  status                        Show audit progress
+  next-domain                   Get next domain to audit
+  start-domain <name>           Mark domain as in-progress
+  complete-domain <name>        Mark domain as done
+  find-boundaries [target]      Discover cross-domain boundaries
+  start-boundary <pair>         Start boundary audit
+  complete-boundary <pair>      Complete boundary audit
+  merge-findings                Merge parallel agent findings
+  report                        Generate final audit report
+USAGE
     ;;
 esac
