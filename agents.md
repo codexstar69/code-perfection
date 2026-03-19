@@ -10,6 +10,12 @@ Instructions for autonomous code refactoring and optimization. Every change must
 - Codebase audit (100+ files): this file + `modes/audit.md` + `modes/resolution-loop.md`
 - Choosing parallel vs sequential: `modes/parallel-vs-sequential.md`
 
+**Script enforcement:** Each mode doc has a corresponding script that drives execution:
+- `scripts/verify.sh` — 8-point verification checklist (runs after every change)
+- `scripts/resolution-loop.sh` — issue ledger, lock, revert-on-failure, auto-commit
+- `scripts/audit-state.sh` — domain state management for large audits
+- `scripts/triage.sh` — structural recon (discovers domains, classifies risk tiers)
+
 ## core instruction
 
 Do only the work required for the task.

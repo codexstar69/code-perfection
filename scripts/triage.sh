@@ -4,6 +4,12 @@
 # Usage: scripts/triage.sh <target-dir>
 set -euo pipefail
 
+# Dependency check
+if ! command -v python3 &>/dev/null; then
+  printf "ERROR: python3 is required but not found in PATH.\n" >&2
+  exit 1
+fi
+
 STATE_DIR=".codeperfect"
 TRIAGE_FILE="$STATE_DIR/triage.json"
 TARGET="${1:-.}"
@@ -18,10 +24,11 @@ mkdir -p "$STATE_DIR"
 
 printf "${CYAN}Triage${NC}: scanning %s...\n" "$TARGET"
 
-python3 -c "
+CP_TARGET="$TARGET" CP_TRIAGE_FILE="$TRIAGE_FILE" python3 -c "
 import os, json, re
 
-target = '$TARGET'
+target = os.environ['CP_TARGET']
+triage_file = os.environ['CP_TRIAGE_FILE']
 
 # Source file extensions
 SOURCE_EXTS = {'.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift', '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.vue', '.svelte'}
@@ -121,7 +128,7 @@ triage = {
     }
 }
 
-with open('$TRIAGE_FILE', 'w') as f:
+with open(triage_file, 'w') as f:
     json.dump(triage, f, indent=2)
 
 # Print summary

@@ -96,7 +96,7 @@ Only the script moves status. The agent does not edit `.codeperfect/issues.json`
 
 When `scripts/verify.sh` fails after a fix attempt:
 
-1. The script reverts immediately via `git checkout -- .` on tracked files.
+1. The script reverts immediately via `git checkout -- .` on tracked files. Untracked files are preserved (never runs `git clean`) to avoid destroying user work.
 2. The script records: what was tried, what broke, the verify output.
 3. The agent reads the failure record and chooses a **fundamentally different approach** — not a tweak.
 4. If the same issue has failed twice, the agent MUST re-read the entire module before attempt 3.
@@ -108,7 +108,7 @@ All enforced by the script, not by agent discipline:
 
 - **Max 3 attempts per issue.** The script blocks further attempts after 3 reverts. Non-negotiable.
 - **Max iterations.** Hard cap: `max(10, issue_count * 3)`. The script exits with an error if exceeded.
-- **No cascading rewrites.** If `scripts/verify.sh` reports failures in files the agent did not touch, the script marks the issue `DEFERRED` with reason "cascading scope."
+- **No cascading rewrites.** The agent must not modify files outside the scope of the current issue. If `scripts/verify.sh` fails, the script reverts all changes and the agent should check whether the failure is in a file it modified. If verification failures appear in untouched files, the agent should call `fail` with reason "cascading scope" and move on.
 - **Checkpoint every 5 resolved issues.** The script runs the full test suite automatically, not just changed-file tests. If new failures appear, the last 5 commits are flagged for review.
 - **Atomic commits.** The script commits after each successful resolution with message format: `fix(codeperfect): ISS-N — <description>`. The agent does not commit manually.
 

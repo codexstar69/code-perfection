@@ -9,6 +9,12 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+# git is used for detecting changed files but is not strictly required —
+# the script can still run with --changed-files.  We note its absence so
+# later steps can skip git-dependent logic gracefully.
+HAS_GIT=false
+command -v git &>/dev/null && HAS_GIT=true
+
 PASS=0
 FAIL=0
 WARN=0
@@ -42,10 +48,14 @@ CHANGED_FILES=()
 if [ "$#" -gt 0 ] && [ "$1" = "--changed-files" ]; then
   shift
   CHANGED_FILES=("$@")
-elif git rev-parse --git-dir &>/dev/null; then
-  mapfile -t CHANGED_FILES < <(git diff --name-only HEAD 2>/dev/null || true)
-  if [ ${#CHANGED_FILES[@]} -eq 0 ]; then
-    mapfile -t CHANGED_FILES < <(git diff --cached --name-only 2>/dev/null || true)
+elif $HAS_GIT && git rev-parse --git-dir &>/dev/null; then
+  while IFS= read -r line; do
+    [ -n "$line" ] && CHANGED_FILES+=("$line")
+  done < <(git diff --name-only HEAD 2>/dev/null || true)
+  if [ "${#CHANGED_FILES[@]:-0}" -eq 0 ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] && CHANGED_FILES+=("$line")
+    done < <(git diff --cached --name-only 2>/dev/null || true)
   fi
 fi
 
@@ -81,6 +91,26 @@ elif [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
   else
     warn "Compiles" "No type checker found for Python — skipping"
   fi
+elif [ -f "mix.exs" ]; then
+  if command -v mix &>/dev/null; then
+    BUILD_OUTPUT=$(mix compile --warnings-as-errors 2>&1) || BUILD_RESULT=$?
+    check "Compiles (mix compile)" "$BUILD_RESULT" "$( [ $BUILD_RESULT -ne 0 ] && echo "$BUILD_OUTPUT" | head -5 )"
+  else
+    warn "Compiles" "mix not found — skipping"
+  fi
+elif [ -f "CMakeLists.txt" ]; then
+  if command -v cmake &>/dev/null; then
+    BUILD_OUTPUT=$(cmake --build . 2>&1) || BUILD_RESULT=$?
+    check "Compiles (cmake)" "$BUILD_RESULT" "$( [ $BUILD_RESULT -ne 0 ] && echo "$BUILD_OUTPUT" | head -5 )"
+  else
+    warn "Compiles" "cmake not found — skipping"
+  fi
+elif [ -f "Makefile" ] || [ -f "makefile" ]; then
+  BUILD_OUTPUT=$(make -n 2>&1) || BUILD_RESULT=$?
+  if [ $BUILD_RESULT -eq 0 ]; then
+    BUILD_OUTPUT=$(make 2>&1) || BUILD_RESULT=$?
+  fi
+  check "Compiles (make)" "$BUILD_RESULT" "$( [ $BUILD_RESULT -ne 0 ] && echo "$BUILD_OUTPUT" | head -5 )"
 else
   warn "Compiles" "No recognized build system — skipping typecheck"
 fi
@@ -113,6 +143,21 @@ elif [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
   else
     warn "Tests pass" "No test runner found — skipping"
   fi
+elif [ -f "mix.exs" ]; then
+  if command -v mix &>/dev/null; then
+    TEST_OUTPUT=$(mix test 2>&1) || TEST_RESULT=$?
+    check "Tests pass" "$TEST_RESULT" "$( [ $TEST_RESULT -ne 0 ] && echo "$TEST_OUTPUT" | tail -10 )"
+  else
+    warn "Tests pass" "mix not found — skipping"
+  fi
+elif [ -f "Makefile" ] || [ -f "makefile" ]; then
+  # Check if Makefile has a test target
+  if make -n test &>/dev/null; then
+    TEST_OUTPUT=$(make test 2>&1) || TEST_RESULT=$?
+    check "Tests pass" "$TEST_RESULT" "$( [ $TEST_RESULT -ne 0 ] && echo "$TEST_OUTPUT" | tail -10 )"
+  else
+    warn "Tests pass" "No test target in Makefile — skipping"
+  fi
 else
   warn "Tests pass" "No recognized test framework — skipping"
 fi
@@ -120,11 +165,13 @@ fi
 # 3. NO NEW `any` — check changed TypeScript files
 ANY_RESULT=0
 TS_CHANGED=()
-for f in "${CHANGED_FILES[@]}"; do
-  [[ "$f" == *.ts || "$f" == *.tsx ]] && [ -f "$f" ] && TS_CHANGED+=("$f")
+for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
+  if [[ "$f" == *.ts || "$f" == *.tsx ]] && [ -f "$f" ]; then
+    TS_CHANGED+=("$f")
+  fi
 done
 
-if [ ${#TS_CHANGED[@]} -gt 0 ]; then
+if [ "${#TS_CHANGED[@]:-0}" -gt 0 ]; then
   ANY_COUNT=0
   ANY_FILES=""
   for f in "${TS_CHANGED[@]}"; do
@@ -147,9 +194,9 @@ fi
 
 # 4. NO SECRETS EXPOSED — check for common secret patterns in changed files
 SECRET_RESULT=0
-if [ ${#CHANGED_FILES[@]} -gt 0 ]; then
+if [ "${#CHANGED_FILES[@]:-0}" -gt 0 ]; then
   SECRET_MATCHES=""
-  for f in "${CHANGED_FILES[@]}"; do
+  for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
     [ -f "$f" ] || continue
     # Check for common secret patterns
     MATCHES=$(grep -inE '(password|secret|api_key|apikey|private_key|access_token)\s*[:=]\s*["\x27][^"\x27]{8,}' "$f" 2>/dev/null | grep -v '^\s*//' | head -3 || true)
@@ -158,7 +205,7 @@ if [ ${#CHANGED_FILES[@]} -gt 0 ]; then
       SECRET_MATCHES="${SECRET_MATCHES}\n  ${f}: $(echo "$MATCHES" | head -1)"
     fi
   done
-  check "No secrets exposed" "$SECRET_RESULT" "$( [ $SECRET_RESULT -ne 0 ] && echo -e "Possible secrets found:${SECRET_MATCHES}" )"
+  check "No secrets exposed" "$SECRET_RESULT" "$( [ $SECRET_RESULT -ne 0 ] && printf "Possible secrets found:%b" "${SECRET_MATCHES}" )"
 else
   check "No secrets exposed" 0 "(no files changed)"
 fi
@@ -166,11 +213,13 @@ fi
 # 5. NO DEAD CODE — check for unused imports in changed TS/JS files
 DEAD_RESULT=0
 JS_CHANGED=()
-for f in "${CHANGED_FILES[@]}"; do
-  [[ "$f" == *.ts || "$f" == *.tsx || "$f" == *.js || "$f" == *.jsx ]] && [ -f "$f" ] && JS_CHANGED+=("$f")
+for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
+  if [[ "$f" == *.ts || "$f" == *.tsx || "$f" == *.js || "$f" == *.jsx ]] && [ -f "$f" ]; then
+    JS_CHANGED+=("$f")
+  fi
 done
 
-if [ ${#JS_CHANGED[@]} -gt 0 ] && command -v npx &>/dev/null && [ -f "package.json" ]; then
+if [ "${#JS_CHANGED[@]:-0}" -gt 0 ] && command -v npx &>/dev/null && [ -f "package.json" ]; then
   # Try eslint unused imports check if available
   LINT_OUTPUT=$(npx eslint --no-eslintrc --rule '{"no-unused-vars": "error"}' "${JS_CHANGED[@]}" 2>&1) || DEAD_RESULT=$?
   if [ "$DEAD_RESULT" -ne 0 ]; then
@@ -188,10 +237,20 @@ else
   check "No dead code" 0 "(skipped — no JS/TS files or no linter)"
 fi
 
-# 6. SCOPE CHECK — warn if many files changed
-if [ ${#CHANGED_FILES[@]} -gt 10 ]; then
+# 6. SCOPE CHECK — fail if too many files changed (hard limit: 20)
+if [ "${#CHANGED_FILES[@]:-0}" -gt 20 ]; then
+  check "No scope creep" 1 "${#CHANGED_FILES[@]} files changed — exceeds hard limit of 20"
+elif [ "${#CHANGED_FILES[@]:-0}" -gt 10 ]; then
   warn "Scope creep" "${#CHANGED_FILES[@]} files changed — review for scope creep"
+else
+  check "No scope creep" 0
 fi
+
+# 7. NAMING CONSISTENT — not mechanically enforceable, agent responsibility
+# (listed in agents.md verification checklist as item 7)
+
+# 8. BEHAVIOR PRESERVED — not mechanically enforceable, agent responsibility
+# (listed in agents.md verification checklist as item 3)
 
 # Summary
 printf "\n=== Results ===\n"
@@ -199,7 +258,7 @@ printf "PASS: %d  |  FAIL: %d  |  WARN: %d\n" "$PASS" "$FAIL" "$WARN"
 
 if [ "$FAIL" -gt 0 ]; then
   printf "${RED}VERIFICATION FAILED${NC}\n"
-  printf "Failures:${FAILURES}\n"
+  printf "Failures:%b\n" "${FAILURES}"
   exit 1
 else
   printf "${GREEN}VERIFICATION PASSED${NC}\n"
