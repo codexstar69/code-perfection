@@ -1,0 +1,201 @@
+#!/usr/bin/env node
+
+/**
+ * Code Perfection — Cross-platform skill installer
+ *
+ * Installs the Code Perfection skill for Claude Code, Codex, and Pi agents.
+ *
+ * Usage:
+ *   code-perfection install          # Install to all detected agents
+ *   code-perfection install --agent claude-code
+ *   code-perfection install --agent codex
+ *   code-perfection install --agent pi
+ *   code-perfection uninstall        # Remove from all agents
+ *   code-perfection status           # Show install status
+ */
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const SKILL_NAME = 'code-perfection';
+const HOME = os.homedir();
+
+const AGENTS = [
+  { name: 'claude-code', skillDir: path.join(HOME, '.claude', 'skills', SKILL_NAME), cmdDir: path.join(HOME, '.claude', 'commands', SKILL_NAME) },
+  { name: 'codex',       skillDir: path.join(HOME, '.codex', 'skills', SKILL_NAME),  cmdDir: path.join(HOME, '.codex', 'commands', SKILL_NAME) },
+  { name: 'pi',          skillDir: path.join(HOME, '.agents', 'skills', SKILL_NAME), cmdDir: path.join(HOME, '.agents', 'commands', SKILL_NAME) },
+  { name: 'cursor',      skillDir: path.join(HOME, '.cursor', 'skills', SKILL_NAME), cmdDir: path.join(HOME, '.cursor', 'commands', SKILL_NAME) },
+  { name: 'kiro',        skillDir: path.join(HOME, '.kiro', 'skills', SKILL_NAME),   cmdDir: path.join(HOME, '.kiro', 'commands', SKILL_NAME) },
+];
+
+const SCRIPT_DIR = path.resolve(__dirname, '..');
+
+// Files to install
+const SKILL_FILES = [
+  { src: 'SKILL.md', dst: 'SKILL.md' },
+];
+
+const REFERENCE_FILES = [
+  { src: path.join('..', 'agents.md'), dst: path.join('references', 'agents.md') },
+  { src: path.join('..', 'modes', 'resolution-loop.md'), dst: path.join('references', 'resolution-loop.md') },
+  { src: path.join('..', 'modes', 'audit.md'), dst: path.join('references', 'audit.md') },
+  { src: path.join('..', 'modes', 'parallel-vs-sequential.md'), dst: path.join('references', 'parallel-vs-sequential.md') },
+];
+
+const SCRIPT_FILES = [
+  { src: path.join('..', 'scripts', 'verify.sh'), dst: path.join('scripts', 'verify.sh') },
+  { src: path.join('..', 'scripts', 'resolution-loop.sh'), dst: path.join('scripts', 'resolution-loop.sh') },
+  { src: path.join('..', 'scripts', 'audit-state.sh'), dst: path.join('scripts', 'audit-state.sh') },
+  { src: path.join('..', 'scripts', 'triage.sh'), dst: path.join('scripts', 'triage.sh') },
+];
+
+const COMMAND_FILES = [
+  { src: path.join('commands', 'code-perfection.md'), dst: 'code-perfection.md' },
+  { src: path.join('commands', 'audit.md'), dst: 'audit.md' },
+  { src: path.join('commands', 'verify.md'), dst: 'verify.md' },
+];
+
+function copyFile(src, dst) {
+  const srcPath = path.resolve(SCRIPT_DIR, src);
+  if (!fs.existsSync(srcPath)) {
+    console.error(`  SKIP: ${src} (source not found)`);
+    return false;
+  }
+  const dstDir = path.dirname(dst);
+  fs.mkdirSync(dstDir, { recursive: true });
+  fs.copyFileSync(srcPath, dst);
+
+  // Make shell scripts executable
+  if (dst.endsWith('.sh')) {
+    fs.chmodSync(dst, 0o755);
+  }
+  return true;
+}
+
+function installAgent(agent) {
+  const parentDir = path.dirname(agent.skillDir);
+  if (!fs.existsSync(path.dirname(parentDir))) {
+    console.log(`  SKIP: ${agent.name} (${path.dirname(parentDir)} does not exist)`);
+    return false;
+  }
+
+  console.log(`  Installing to ${agent.name}...`);
+  fs.mkdirSync(agent.skillDir, { recursive: true });
+  fs.mkdirSync(path.join(agent.skillDir, 'references'), { recursive: true });
+  fs.mkdirSync(path.join(agent.skillDir, 'scripts'), { recursive: true });
+  fs.mkdirSync(agent.cmdDir, { recursive: true });
+
+  let count = 0;
+
+  // Skill files
+  for (const f of SKILL_FILES) {
+    if (copyFile(f.src, path.join(agent.skillDir, f.dst))) count++;
+  }
+
+  // Reference files
+  for (const f of REFERENCE_FILES) {
+    if (copyFile(f.src, path.join(agent.skillDir, f.dst))) count++;
+  }
+
+  // Script files
+  for (const f of SCRIPT_FILES) {
+    if (copyFile(f.src, path.join(agent.skillDir, f.dst))) count++;
+  }
+
+  // Command files
+  for (const f of COMMAND_FILES) {
+    if (copyFile(f.src, path.join(agent.cmdDir, f.dst))) count++;
+  }
+
+  console.log(`    ${count} files installed`);
+  return true;
+}
+
+function uninstallAgent(agent) {
+  let removed = false;
+  if (fs.existsSync(agent.skillDir)) {
+    fs.rmSync(agent.skillDir, { recursive: true });
+    console.log(`  Removed ${agent.skillDir}`);
+    removed = true;
+  }
+  if (fs.existsSync(agent.cmdDir)) {
+    fs.rmSync(agent.cmdDir, { recursive: true });
+    console.log(`  Removed ${agent.cmdDir}`);
+    removed = true;
+  }
+  if (!removed) {
+    console.log(`  SKIP: ${agent.name} (not installed)`);
+  }
+  return removed;
+}
+
+function statusAgent(agent) {
+  const skillExists = fs.existsSync(path.join(agent.skillDir, 'SKILL.md'));
+  const cmdExists = fs.existsSync(agent.cmdDir);
+  const scriptsExist = fs.existsSync(path.join(agent.skillDir, 'scripts', 'verify.sh'));
+
+  if (skillExists && scriptsExist) {
+    console.log(`  ${agent.name}: INSTALLED (${agent.skillDir})`);
+  } else if (skillExists) {
+    console.log(`  ${agent.name}: PARTIAL (missing scripts)`);
+  } else {
+    const parentExists = fs.existsSync(path.dirname(path.dirname(agent.skillDir)));
+    console.log(`  ${agent.name}: NOT INSTALLED${parentExists ? '' : ' (agent not detected)'}`);
+  }
+}
+
+// CLI
+const args = process.argv.slice(2);
+const command = args[0] || 'help';
+const agentFilter = args.indexOf('--agent') !== -1 ? args[args.indexOf('--agent') + 1] : null;
+
+const targetAgents = agentFilter
+  ? AGENTS.filter(a => a.name === agentFilter)
+  : AGENTS;
+
+if (agentFilter && targetAgents.length === 0) {
+  console.error(`Unknown agent: ${agentFilter}`);
+  console.error(`Available: ${AGENTS.map(a => a.name).join(', ')}`);
+  process.exit(1);
+}
+
+switch (command) {
+  case 'install': {
+    console.log(`Installing Code Perfection skill...`);
+    let installed = 0;
+    for (const agent of targetAgents) {
+      if (installAgent(agent)) installed++;
+    }
+    console.log(`\nDone: installed to ${installed} agent(s).`);
+    if (installed > 0) {
+      console.log('\nUsage:');
+      console.log('  /code-perfection src/          # Run resolution loop');
+      console.log('  /code-perfection:audit src/    # Full codebase audit');
+      console.log('  /code-perfection:verify        # Run verification checklist');
+    }
+    break;
+  }
+  case 'uninstall': {
+    console.log(`Uninstalling Code Perfection skill...`);
+    for (const agent of targetAgents) {
+      uninstallAgent(agent);
+    }
+    console.log('Done.');
+    break;
+  }
+  case 'status': {
+    console.log('Code Perfection skill status:');
+    for (const agent of targetAgents) {
+      statusAgent(agent);
+    }
+    break;
+  }
+  default:
+    console.log(`Code Perfection — Autonomous Refactoring Agent\n`);
+    console.log('Usage:');
+    console.log('  code-perfection install [--agent <name>]    Install the skill');
+    console.log('  code-perfection uninstall [--agent <name>]  Remove the skill');
+    console.log('  code-perfection status                      Show install status');
+    console.log(`\nAgents: ${AGENTS.map(a => a.name).join(', ')}`);
+}
