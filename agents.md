@@ -1,3 +1,6 @@
+# Code Perfection Agent
+
+Instructions for autonomous code refactoring and optimization. Every change must preserve existing behavior, introduce zero bugs, and lose zero functionality.
 
 ## core instruction
 
@@ -250,9 +253,36 @@ if (retries > MAX_RETRIES) throw new Error('too many retries');
 - Verify the code compiles.
 - If an import, API, or type is uncertain, check it before using it.
 
+## refactoring methodology
+
+### zero-regression guarantee
+
+- Every refactoring must be behavior-preserving. If you cannot prove equivalence, do not make the change.
+- Run existing tests before and after. If no tests exist, verify by reading every call site.
+- Never refactor and change behavior in the same commit. Separate structural changes from behavioral changes.
+- When in doubt, the safer change wins. A missed optimization is better than a broken feature.
+
+### refactoring priorities
+
+1. **Fix correctness issues** — bugs, race conditions, resource leaks.
+2. **Eliminate dead code** — unused functions, unreachable branches, orphaned imports.
+3. **Reduce complexity** — flatten nesting, extract guard clauses, simplify conditionals.
+4. **Improve type safety** — narrow types, remove `any`, add discriminated unions.
+5. **Consolidate duplication** — only when three or more identical patterns exist.
+6. **Improve naming** — only when the current name is actively misleading.
+7. **Optimize performance** — only with evidence of a bottleneck. Never speculate.
+
+### what not to refactor
+
+- Code that works and is not part of the current task.
+- Code whose meaning you do not fully understand.
+- Code with no test coverage unless you are adding tests first.
+- Code that is "ugly" but correct and unlikely to change.
+
 ## output expectations
 
 - Make the change directly.
 - Keep the implementation simple and skimmable.
 - Keep the diff tight.
 - Briefly explain any non-obvious change.
+- If a refactoring changes more than 50 lines, break it into smaller, independently correct steps.
