@@ -102,6 +102,13 @@ assert(user, `user not found: ${id}`);
 - Do not create wrapper functions that just pass values through.
 - No barrel exports unless the project already uses them.
 
+### interfaces and contracts
+
+- Keep function signatures stable. Changing a public function's signature is a breaking change — all callers must be updated.
+- Prefer adding new functions over modifying existing signatures when extending behavior.
+- Return consistent types. A function should not return `string | undefined | null` — pick one failure representation.
+- Document non-obvious preconditions and postconditions in the type signature, not in comments.
+
 ### naming and conventions
 
 - Use descriptive names that reveal intent. Avoid abbreviations except widely understood ones (`id`, `url`, `config`).
