@@ -181,6 +181,14 @@ const [users, orders] = await Promise.all([fetchUsers(), fetchOrders()]);
 - Do not log excessively in hot paths. Logging has a cost.
 - Prefer structured logging (key-value pairs) over string concatenation.
 
+```ts
+// bad — unstructured, missing context
+console.log('User login failed');
+
+// good — structured with context
+logger.warn('login_failed', { userId, reason: 'invalid_credentials', ip: req.ip });
+```
+
 ### patterns and anti-patterns
 
 - Avoid code smells: long methods, god objects, feature envy, shotgun surgery.
