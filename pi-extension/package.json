@@ -1,0 +1,12 @@
+{
+  "name": "@codexstar/code-perfection",
+  "version": "1.0.0",
+  "description": "Autonomous code refactoring with enforced resolution loops, zero-regression verification, and large codebase audit strategy",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  }
+}
