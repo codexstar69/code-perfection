@@ -118,8 +118,9 @@ fi
 # 2. TESTS PASS — detect test runner and run it
 TEST_RESULT=0
 if [ -f "package.json" ]; then
-  # Check if test script exists
-  HAS_TEST=$(node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)" 2>/dev/null && echo "yes" || echo "no")
+  # Check if test script exists (grep is faster than spawning node)
+  HAS_TEST="no"
+  grep -q '"test"' package.json 2>/dev/null && HAS_TEST="yes"
   if [ "$HAS_TEST" = "yes" ]; then
     # Set CI=true to disable watch mode in jest/vitest and avoid interactive prompts
     if command -v bun &>/dev/null; then
@@ -221,29 +222,36 @@ for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
 done
 
 if [ "${#JS_CHANGED[@]:-0}" -gt 0 ] && [ -f "package.json" ]; then
-  # Try the project's existing lint setup first, fall back to basic grep check
+  # Fast unused-import detection via grep (avoids slow npx eslint cold start).
+  # For each changed file, extract named imports and check if they appear
+  # elsewhere in the file beyond the import line.
   DEAD_CHECKED=false
-  if command -v npx &>/dev/null; then
-    # Try eslint with --no-eslintrc (v8) or without it (v9 flat config)
-    LINT_OUTPUT=$(npx eslint --no-eslintrc --rule '{"no-unused-vars": "error"}' "${JS_CHANGED[@]}" 2>&1) || DEAD_RESULT=$?
-    if [ "$DEAD_RESULT" -ne 0 ]; then
-      if echo "$LINT_OUTPUT" | grep -q "no-unused-vars"; then
-        check "No dead code (unused vars)" "$DEAD_RESULT" "$(echo "$LINT_OUTPUT" | grep 'no-unused-vars' | head -5)"
-        DEAD_CHECKED=true
-      elif echo "$LINT_OUTPUT" | grep -q "ERR_INVALID_ARG\|--no-eslintrc"; then
-        # ESLint v9+ does not support --no-eslintrc; skip gracefully
-        DEAD_RESULT=0
+  UNUSED_IMPORTS=""
+  UNUSED_COUNT=0
+
+  for f in "${JS_CHANGED[@]}"; do
+    # Extract named imports: import { Foo, Bar } from '...'
+    while IFS= read -r import_name; do
+      [ -z "$import_name" ] && continue
+      # Count occurrences of the import name in the file (excluding import lines)
+      USES=$(grep -c "\b${import_name}\b" "$f" 2>/dev/null || echo "0")
+      # Subtract the import declaration itself (at least 1 occurrence)
+      if [ "$USES" -le 1 ]; then
+        UNUSED_COUNT=$((UNUSED_COUNT + 1))
+        UNUSED_IMPORTS="${UNUSED_IMPORTS}\n  ${f}: unused import '${import_name}'"
       fi
-    else
-      check "No dead code" 0
-      DEAD_CHECKED=true
-    fi
+    done < <(grep -oE 'import\s*\{[^}]+\}' "$f" 2>/dev/null | sed 's/import\s*{//;s/}//' | tr ',' '\n' | sed 's/\s*as\s.*//;s/[[:space:]]//g' | grep -v '^$')
+  done
+
+  if [ "$UNUSED_COUNT" -gt 0 ]; then
+    DEAD_RESULT=1
+    check "No dead code (unused imports)" "$DEAD_RESULT" "$(printf '%d potentially unused imports:%b' "$UNUSED_COUNT" "$UNUSED_IMPORTS" | head -8)"
+  else
+    check "No dead code" 0
   fi
-  if ! $DEAD_CHECKED; then
-    check "No dead code" 0 "(lint check not applicable — skipped)"
-  fi
+  DEAD_CHECKED=true
 else
-  check "No dead code" 0 "(skipped — no JS/TS files or no linter)"
+  check "No dead code" 0 "(skipped — no JS/TS files or no package.json)"
 fi
 
 # 6. SCOPE CHECK — fail if too many files changed (hard limit: 20)

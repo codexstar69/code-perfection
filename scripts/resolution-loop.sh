@@ -4,66 +4,29 @@
 # Usage: scripts/resolution-loop.sh <command> [args...]
 set -euo pipefail
 
-# Dependency check
-if ! command -v python3 &>/dev/null; then
-  printf "ERROR: python3 is required but not found in PATH.\n" >&2
-  exit 1
-fi
-if ! command -v git &>/dev/null; then
-  printf "ERROR: git is required but not found in PATH.\n" >&2
-  exit 1
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE_DIR=".codeperfect"
-ISSUES_FILE="$STATE_DIR/issues.json"
-LOCK_FILE="$STATE_DIR/fix.lock"
-ITERATION_FILE="$STATE_DIR/iteration-count"
+source "$SCRIPT_DIR/_lib.sh"
+
+check_python3
+check_git
+
 MAX_ATTEMPTS=3
 
-# Atomic JSON write helper — used by inline Python to prevent corruption on crash.
-# Writes to a temp file then renames (atomic on POSIX).
-ATOMIC_WRITE_PY='
-import tempfile
-def atomic_json_write(filepath, data):
-    import json, os
-    dir_ = os.path.dirname(os.path.abspath(filepath))
-    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp", prefix=".issues_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, filepath)
-    except BaseException:
-        try: os.unlink(tmp)
-        except OSError: pass
-        raise
-'
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-ensure_state_dir() {
-  mkdir -p "$STATE_DIR"
-}
+# --- File management ---
 
 ensure_issues_file() {
   if [ ! -f "$ISSUES_FILE" ]; then
     ensure_state_dir
-    printf '{"version":1,"created":"%s","target":".","issues":[]}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ISSUES_FILE"
+    printf '{"version":1,"created":"%s","target":".","issues":[]}\n' "$(utc_timestamp)" > "$ISSUES_FILE"
   fi
 }
 
+# --- Lock management ---
+
 cleanup_lock() {
-  # Only remove lock dir if we are the owner (PID file matches ours)
   if [ -d "$LOCK_FILE" ]; then
     local lock_pid
-    lock_pid=$(cat "$LOCK_FILE/pid" 2>/dev/null || echo "")
+    lock_pid=$(<"$LOCK_FILE/pid" 2>/dev/null || echo "")
     if [ "$lock_pid" = "$$" ]; then
       rm -rf "$LOCK_FILE"
     fi
@@ -73,33 +36,21 @@ cleanup_lock() {
 acquire_lock() {
   ensure_state_dir
   if [ -d "$LOCK_FILE" ]; then
-    # Check issue state: if any issue is in_progress, the lock is legitimate
-    # even if the original PID is gone (cross-invocation lock).
+    # Pure-bash check: is any issue in_progress?
     local has_in_progress=false
     if [ -f "$ISSUES_FILE" ]; then
-      has_in_progress=$(CP_ISSUES_FILE="$ISSUES_FILE" python3 -c "
-import json, os
-with open(os.environ['CP_ISSUES_FILE']) as f:
-    data = json.load(f)
-print('true' if any(i['status'] == 'in_progress' for i in data['issues']) else 'false')
-" 2>/dev/null || echo "false")
+      json_has_status "$ISSUES_FILE" "in_progress" && has_in_progress=true
     fi
     if [ "$has_in_progress" = "true" ]; then
-      printf "${RED}ERROR${NC}: Lock held — an issue is already in_progress. Resolve or fail it first.\n"
-      exit 1
+      die "Lock held — an issue is already in_progress. Resolve or fail it first."
     fi
-    printf "${YELLOW}WARN${NC}: Stale lock found (no in_progress issues). Removing.\n"
+    warn_msg "Stale lock found (no in_progress issues). Removing."
     rm -rf "$LOCK_FILE"
   fi
-  # mkdir is atomic on POSIX — two processes cannot both succeed
   if ! mkdir "$LOCK_FILE" 2>/dev/null; then
-    printf "${RED}ERROR${NC}: Failed to acquire lock (race condition). Retry.\n"
-    exit 1
+    die "Failed to acquire lock (race condition). Retry."
   fi
   echo $$ > "$LOCK_FILE/pid"
-  # Do NOT set EXIT trap — the lock must persist across script invocations
-  # (start -> resolve/fail are separate invocations). Only SIGINT/SIGTERM
-  # during the start command itself should clean up.
   trap 'cleanup_lock; exit 130' INT
   trap 'cleanup_lock; exit 143' TERM
 }
@@ -108,52 +59,36 @@ release_lock() {
   rm -rf "$LOCK_FILE"
 }
 
-# Generate next issue ID
-next_id() {
-  local max_id
-  max_id=$(CP_ISSUES_FILE="$ISSUES_FILE" python3 -c "
-import json, os, sys
-with open(os.environ['CP_ISSUES_FILE']) as f:
-    data = json.load(f)
-ids = [int(i['id'].replace('ISS-','')) for i in data['issues'] if i['id'].startswith('ISS-')]
-print(max(ids) + 1 if ids else 1)
-" 2>/dev/null || echo "1")
-  echo "ISS-$max_id"
-}
+# --- Commands ---
 
-# Commands
 cmd_init() {
   local target="${1:-.}"
   ensure_state_dir
-  printf '{"version":1,"created":"%s","target":"%s","issues":[]}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$target" > "$ISSUES_FILE"
-  # Reset iteration counter
+  local ts
+  ts="$(utc_timestamp)"
+  printf '{"version":1,"created":"%s","target":"%s","issues":[]}\n' "$ts" "$target" > "$ISSUES_FILE"
   echo "0" > "$ITERATION_FILE"
-  printf "${GREEN}Initialized${NC} issue ledger at %s for target: %s\n" "$ISSUES_FILE" "$target"
+  ok_msg "Initialized issue ledger at $ISSUES_FILE for target: $target"
 }
 
 cmd_add() {
   if [ $# -lt 4 ]; then
-    printf "${RED}ERROR${NC}: add requires 4 arguments: <file> <line> <severity> <description>\n" >&2
-    exit 1
+    die "add requires 4 arguments: <file> <line> <severity> <description>"
   fi
-  local file="$1"
-  local line="$2"
-  local severity="$3"
-  local description="$4"
+  local file="$1" line="$2" severity="$3" description="$4"
   ensure_issues_file
 
+  # Pure-bash hot path for next ID
   local id
-  id=$(next_id)
+  id=$(json_next_issue_id "$ISSUES_FILE")
 
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" CP_FILE="$file" \
   CP_LINE="$line" CP_SEVERITY="$severity" CP_DESC="$description" \
   python3 -c "
 ${ATOMIC_WRITE_PY}
-import json, os, sys
+import json, os
 issues_file = os.environ['CP_ISSUES_FILE']
-with open(issues_file) as f:
-    data = json.load(f)
+data, _ = safe_json_load(issues_file)
 data['issues'].append({
     'id': os.environ['CP_ID'],
     'file': os.environ['CP_FILE'],
@@ -164,24 +99,67 @@ data['issues'].append({
     'attempts': 0,
     'history': []
 })
-atomic_json_write(issues_file, data)
+atomic_json_write_with_backup(issues_file, data)
 "
   printf "${GREEN}Added${NC} %s [%s] %s:%s — %s\n" "$id" "$severity" "$file" "$line" "$description"
+}
+
+cmd_add_batch() {
+  # Batch add: reads issues from stdin, one per line as: file|line|severity|description
+  # Avoids N python3 invocations for N issues.
+  ensure_issues_file
+
+  local batch_input
+  batch_input=$(</dev/stdin)
+  [ -z "$batch_input" ] && die "add-batch: no input on stdin"
+
+  CP_ISSUES_FILE="$ISSUES_FILE" CP_BATCH="$batch_input" \
+  python3 -c "
+${ATOMIC_WRITE_PY}
+import json, os, sys
+issues_file = os.environ['CP_ISSUES_FILE']
+data, _ = safe_json_load(issues_file)
+existing_ids = [int(i['id'].replace('ISS-','')) for i in data['issues'] if i['id'].startswith('ISS-')]
+next_num = max(existing_ids) + 1 if existing_ids else 1
+added = 0
+for line in os.environ['CP_BATCH'].strip().split('\n'):
+    parts = line.split('|', 3)
+    if len(parts) < 4:
+        print(f'WARN: Skipping malformed line: {line}', file=sys.stderr)
+        continue
+    file_, line_num, severity, desc = parts
+    issue_id = f'ISS-{next_num}'
+    data['issues'].append({
+        'id': issue_id,
+        'file': file_.strip(),
+        'line': int(line_num.strip()),
+        'severity': severity.strip(),
+        'description': desc.strip(),
+        'status': 'open',
+        'attempts': 0,
+        'history': []
+    })
+    print(f'Added {issue_id} [{severity.strip()}] {file_.strip()}:{line_num.strip()} — {desc.strip()}')
+    next_num += 1
+    added += 1
+atomic_json_write_with_backup(issues_file, data)
+print(f'Batch complete: {added} issues added')
+"
 }
 
 cmd_scan() {
   local target="${1:-.}"
   ensure_state_dir
   ensure_issues_file
-  printf "${CYAN}Scanning${NC} %s for issues...\n" "$target"
+  info_msg "Scanning $target for issues..."
   printf "${YELLOW}NOTE${NC}: The agent must populate the ledger by calling 'add' for each issue found.\n"
   printf "       Run: scripts/resolution-loop.sh add <file> <line> <severity> <description>\n"
+  printf "       Or batch: echo 'file|line|sev|desc' | scripts/resolution-loop.sh add-batch\n"
 }
 
 cmd_start() {
   if [ $# -lt 1 ]; then
-    printf "${RED}ERROR${NC}: start requires 1 argument: <ISS-N>\n" >&2
-    exit 1
+    die "start requires 1 argument: <ISS-N>"
   fi
   local id="$1"
   acquire_lock
@@ -194,8 +172,7 @@ import json, os, sys
 issues_file = os.environ['CP_ISSUES_FILE']
 issue_id = os.environ['CP_ID']
 max_attempts = int(os.environ['CP_MAX'])
-with open(issues_file) as f:
-    data = json.load(f)
+data, _ = safe_json_load(issues_file)
 found = False
 for issue in data['issues']:
     if issue['id'] == issue_id:
@@ -206,7 +183,7 @@ for issue in data['issues']:
             print(f'ERROR: {issue_id} has exhausted all {max_attempts} attempts — auto-deferring')
             issue['status'] = 'deferred'
             issue['history'].append({'attempt': issue['attempts'], 'action': 'auto-deferred', 'reason': 'max attempts reached'})
-            atomic_json_write(issues_file, data)
+            atomic_json_write_with_backup(issues_file, data)
             sys.exit(1)
         issue['status'] = 'in_progress'
         found = True
@@ -214,24 +191,23 @@ for issue in data['issues']:
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-atomic_json_write(issues_file, data)
+atomic_json_write_with_backup(issues_file, data)
 " || start_result=$?
 
   if [ "$start_result" -ne 0 ]; then
     release_lock
     exit 1
   fi
-  printf "${CYAN}Started${NC} %s\n" "$id"
+  info_msg "Started $id"
 }
 
 cmd_resolve() {
   if [ $# -lt 1 ]; then
-    printf "${RED}ERROR${NC}: resolve requires 1 argument: <ISS-N>\n" >&2
-    exit 1
+    die "resolve requires 1 argument: <ISS-N>"
   fi
   local id="$1"
   local timestamp
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  timestamp="$(utc_timestamp)"
 
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" CP_TIMESTAMP="$timestamp" \
   python3 -c "
@@ -240,8 +216,7 @@ import json, os, sys
 issues_file = os.environ['CP_ISSUES_FILE']
 issue_id = os.environ['CP_ID']
 timestamp = os.environ['CP_TIMESTAMP']
-with open(issues_file) as f:
-    data = json.load(f)
+data, _ = safe_json_load(issues_file)
 found = False
 for issue in data['issues']:
     if issue['id'] == issue_id:
@@ -256,50 +231,48 @@ for issue in data['issues']:
             'action': 'resolved',
             'timestamp': timestamp
         })
+        # Print description for commit message
+        print(f'DESC:{issue[\"description\"]}')
         break
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-atomic_json_write(issues_file, data)
-" || { release_lock; exit 1; }
+atomic_json_write_with_backup(issues_file, data)
+" > /tmp/.cp_resolve_out 2>&1 || { release_lock; cat /tmp/.cp_resolve_out; exit 1; }
+
+  local resolve_output
+  resolve_output=$(<"/tmp/.cp_resolve_out")
+
+  # Check for errors
+  if [[ "$resolve_output" == ERROR:* ]]; then
+    printf "%s\n" "$resolve_output"
+    release_lock
+    exit 1
+  fi
 
   # Auto-commit the fix
   if git rev-parse --git-dir &>/dev/null; then
-    local desc
-    desc=$(CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" python3 -c "
-import json, os
-with open(os.environ['CP_ISSUES_FILE']) as f:
-    data = json.load(f)
-for issue in data['issues']:
-    if issue['id'] == os.environ['CP_ID']:
-        print(issue['description'])
-        break
-")
-    # Stage only tracked files that changed (not untracked files which may be
-    # unrelated user work). Exclude the .codeperfect state directory.
+    # Extract description from python output (DESC:...)
+    local desc=""
+    if [[ "$resolve_output" == DESC:* ]]; then
+      desc="${resolve_output#DESC:}"
+    fi
     git add --update -- ':!.codeperfect'
-    # Only commit if there are staged changes
     if ! git diff --cached --quiet 2>/dev/null; then
-      # Use -F - to avoid shell interpretation issues with special chars in desc
       if ! printf 'fix(codeperfect): %s — %s' "$id" "$desc" | git commit -F -; then
-        printf "${YELLOW}WARN${NC}: git commit failed for %s — changes are staged but not committed\n" "$id"
+        warn_msg "git commit failed for $id — changes are staged but not committed"
       fi
     fi
   fi
 
   release_lock
-  printf "${GREEN}Resolved${NC} %s\n" "$id"
+  ok_msg "Resolved $id"
 
-  # Checkpoint: run full test suite every 5 resolved issues
+  # Checkpoint: run full test suite every 5 resolved issues (pure-bash count)
   local done_count
-  done_count=$(CP_ISSUES_FILE="$ISSUES_FILE" python3 -c "
-import json, os
-with open(os.environ['CP_ISSUES_FILE']) as f:
-    data = json.load(f)
-print(sum(1 for i in data['issues'] if i['status'] == 'done'))
-")
+  done_count=$(json_count_by_status "$ISSUES_FILE" "done")
   if [ $((done_count % 5)) -eq 0 ] && [ "$done_count" -gt 0 ]; then
-    printf "${CYAN}Checkpoint${NC}: %d issues resolved — running full verification...\n" "$done_count"
+    info_msg "Checkpoint: $done_count issues resolved — running full verification..."
     "$SCRIPT_DIR/verify.sh" || {
       printf "${RED}CHECKPOINT FAILED${NC}: Full verification failed after %d resolved issues.\n" "$done_count"
       printf "Review the last 5 commits for regressions.\n"
@@ -309,16 +282,15 @@ print(sum(1 for i in data['issues'] if i['status'] == 'done'))
 
 cmd_fail() {
   if [ $# -lt 1 ]; then
-    printf "${RED}ERROR${NC}: fail requires at least 1 argument: <ISS-N> [reason]\n" >&2
-    exit 1
+    die "fail requires at least 1 argument: <ISS-N> [reason]"
   fi
   local id="$1"
   local reason="${2:-unspecified}"
   local timestamp
-  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  timestamp="$(utc_timestamp)"
 
-  # Validate issue status BEFORE reverting to avoid destroying work
-  # if this is called on a done/deferred issue by mistake.
+  # Validate issue status BEFORE reverting (pure-bash pre-check for speed,
+  # then authoritative python check).
   ensure_issues_file
   local status_check=0
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" python3 -c "
@@ -341,15 +313,11 @@ sys.exit(1)
     exit 1
   fi
 
-  # Revert tracked file changes only. Do NOT run git clean — it would
-  # destroy untracked user files (new files, scratch work, etc.).
-  # Only remove files that the agent created during this attempt by
-  # reverting tracked changes and unstaging new files.
+  # Revert tracked file changes only.
   if git rev-parse --git-dir &>/dev/null; then
     git checkout -- ':!.codeperfect' 2>/dev/null || true
-    # Unstage any newly staged files, but do NOT delete them
     git reset HEAD -- ':!.codeperfect' 2>/dev/null || true
-    printf "${YELLOW}Reverted${NC} tracked file changes (untracked files preserved)\n"
+    warn_msg "Reverted tracked file changes (untracked files preserved)"
   fi
 
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" CP_REASON="$reason" \
@@ -362,8 +330,7 @@ issue_id = os.environ['CP_ID']
 reason = os.environ['CP_REASON']
 timestamp = os.environ['CP_TIMESTAMP']
 max_attempts = int(os.environ['CP_MAX'])
-with open(issues_file) as f:
-    data = json.load(f)
+data, _ = safe_json_load(issues_file)
 found = False
 for issue in data['issues']:
     if issue['id'] == issue_id:
@@ -394,7 +361,7 @@ for issue in data['issues']:
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-atomic_json_write(issues_file, data)
+atomic_json_write_with_backup(issues_file, data)
 "
   release_lock
 }
@@ -402,20 +369,17 @@ atomic_json_write(issues_file, data)
 cmd_status() {
   ensure_issues_file
 
-  # Track and enforce max iterations: max(10, issue_count * 3)
+  # Track iteration count (pure bash — no python needed)
   local iteration=0
   if [ -f "$ITERATION_FILE" ]; then
-    iteration=$(cat "$ITERATION_FILE" 2>/dev/null || echo "0")
+    iteration=$(<"$ITERATION_FILE" 2>/dev/null || echo "0")
   fi
   iteration=$((iteration + 1))
   echo "$iteration" > "$ITERATION_FILE"
 
+  # Pure-bash issue count for iteration cap
   local issue_count
-  issue_count=$(CP_ISSUES_FILE="$ISSUES_FILE" python3 -c "
-import json, os
-with open(os.environ['CP_ISSUES_FILE']) as f:
-    print(len(json.load(f)['issues']))
-" 2>/dev/null || echo "0")
+  issue_count=$(json_count_issues "$ISSUES_FILE")
 
   local max_iterations=10
   local computed=$((issue_count * 3))
@@ -430,10 +394,10 @@ with open(os.environ['CP_ISSUES_FILE']) as f:
   fi
   printf "${CYAN}Iteration${NC} %d / %d max\n" "$iteration" "$max_iterations"
 
+  # Status display still needs python for sorting/formatting
   CP_ISSUES_FILE="$ISSUES_FILE" python3 -c "
 import json, os, sys
-with open(os.environ['CP_ISSUES_FILE']) as f:
-    data = json.load(f)
+data, corrupted = __import__('builtins').__dict__.get('safe_json_load', lambda f: (json.load(open(f)), False))(os.environ['CP_ISSUES_FILE']) if False else (json.load(open(os.environ['CP_ISSUES_FILE'])), False)
 
 issues = data['issues']
 total = len(issues)
@@ -461,9 +425,9 @@ if remaining > 0:
     )
     for i in pending[:5]:
         print(f\"  {i['id']} [{i['severity']}] {i['file']}:{i['line']} — {i['description']} (attempts: {i['attempts']})\")
-    sys.exit(1)  # Issues remain — loop must continue
+    sys.exit(1)
 else:
-    sys.exit(0)  # All done — loop can exit
+    sys.exit(0)
 "
 }
 
@@ -509,30 +473,40 @@ if deferred:
 print('\n'.join(lines))
 " > "$report_file"
 
-  printf "${GREEN}Report${NC} written to %s\n" "$report_file"
+  ok_msg "Report written to $report_file"
   cat "$report_file"
 }
 
-# Dispatch
+# --- Dispatch ---
 case "${1:-help}" in
-  init)    shift; cmd_init "$@" ;;
-  scan)    shift; cmd_scan "$@" ;;
-  add)     shift; cmd_add "$@" ;;
-  start)   shift; cmd_start "$@" ;;
-  resolve) shift; cmd_resolve "$@" ;;
-  fail)    shift; cmd_fail "$@" ;;
-  status)  cmd_status ;;
-  report)  cmd_report ;;
+  init)      shift; cmd_init "$@" ;;
+  scan)      shift; cmd_scan "$@" ;;
+  add)       shift; cmd_add "$@" ;;
+  add-batch) shift; cmd_add_batch "$@" ;;
+  start)     shift; cmd_start "$@" ;;
+  resolve)   shift; cmd_resolve "$@" ;;
+  fail)      shift; cmd_fail "$@" ;;
+  status)    cmd_status ;;
+  report)    cmd_report ;;
   help|*)
-    printf "Usage: scripts/resolution-loop.sh <command> [args...]\n\n"
-    printf "Commands:\n"
-    printf "  init [target]                          Initialize issue ledger\n"
-    printf "  scan [target]                          Prompt agent to scan for issues\n"
-    printf "  add <file> <line> <severity> <desc>    Add an issue to the ledger\n"
-    printf "  start <ISS-N>                          Mark issue as in-progress (acquires lock)\n"
-    printf "  resolve <ISS-N>                        Mark issue as done (auto-commits, releases lock)\n"
-    printf "  fail <ISS-N> <reason>                  Revert changes, record failure (releases lock)\n"
-    printf "  status                                 Show progress (exit 0=done, 1=continue)\n"
-    printf "  report                                 Generate final report\n"
+    cat <<'USAGE'
+Usage: scripts/resolution-loop.sh <command> [args...]
+
+Commands:
+  init [target]                          Initialize issue ledger
+  scan [target]                          Prompt agent to scan for issues
+  add <file> <line> <severity> <desc>    Add an issue to the ledger
+  add-batch                              Add issues from stdin (file|line|sev|desc per line)
+  start <ISS-N>                          Mark issue as in-progress (acquires lock)
+  resolve <ISS-N>                        Mark issue as done (auto-commits, releases lock)
+  fail <ISS-N> <reason>                  Revert changes, record failure (releases lock)
+  status                                 Show progress (exit codes below)
+  report                                 Generate final report
+
+Exit codes for 'status':
+  0  All issues resolved or deferred — loop can exit
+  1  Issues remain — loop MUST continue
+  2  Max iterations exceeded — loop force-stopped
+USAGE
     ;;
 esac

@@ -100,6 +100,22 @@ cmd_add() {
   local line="$2"
   local severity="$3"
   local description="$4"
+
+  # Validate severity
+  case "$severity" in
+    critical|high|medium|low) ;;
+    *)
+      printf "${RED}ERROR${NC}: Invalid severity '%s'. Must be one of: critical, high, medium, low\n" "$severity" >&2
+      exit 1
+      ;;
+  esac
+
+  # Validate line is a number
+  if ! [[ "$line" =~ ^[0-9]+$ ]]; then
+    printf "${RED}ERROR${NC}: Line must be a number, got '%s'\n" "$line" >&2
+    exit 1
+  fi
+
   ensure_issues_file
 
   local id
@@ -122,8 +138,10 @@ data['issues'].append({
     'attempts': 0,
     'history': []
 })
-with open(issues_file, 'w') as f:
+tmp = issues_file + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(data, f, indent=2)
+os.replace(tmp, issues_file)
 "
   printf "${GREEN}Added${NC} %s [%s] %s:%s — %s\n" "$id" "$severity" "$file" "$line" "$description"
 }
@@ -164,8 +182,10 @@ for issue in data['issues']:
             print(f'ERROR: {issue_id} has exhausted all {max_attempts} attempts — auto-deferring')
             issue['status'] = 'deferred'
             issue['history'].append({'attempt': issue['attempts'], 'action': 'auto-deferred', 'reason': 'max attempts reached'})
-            with open(issues_file, 'w') as f:
+            tmp = issues_file + '.tmp'
+            with open(tmp, 'w') as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp, issues_file)
             sys.exit(1)
         issue['status'] = 'in_progress'
         found = True
@@ -173,8 +193,10 @@ for issue in data['issues']:
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-with open(issues_file, 'w') as f:
+tmp = issues_file + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(data, f, indent=2)
+os.replace(tmp, issues_file)
 " || start_result=$?
 
   if [ "$start_result" -ne 0 ]; then
@@ -219,8 +241,10 @@ for issue in data['issues']:
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-with open(issues_file, 'w') as f:
+tmp = issues_file + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(data, f, indent=2)
+os.replace(tmp, issues_file)
 " || { release_lock; exit 1; }
 
   # Auto-commit the fix
@@ -331,8 +355,10 @@ for issue in data['issues']:
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-with open(issues_file, 'w') as f:
+tmp = issues_file + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(data, f, indent=2)
+os.replace(tmp, issues_file)
 " || fail_result=$?
   release_lock
   [ "$fail_result" -ne 0 ] && exit "$fail_result"

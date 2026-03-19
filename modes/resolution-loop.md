@@ -37,14 +37,43 @@ ITERATION = 0
    IF new issue discovered during fix:
        scripts/resolution-loop.sh add "<file>" "<line>" "<severity>" "<description>"
        → adds new OPEN issue to the ledger
+   IF multiple issues discovered at once:
+       echo 'file|line|sev|desc\nfile|line|sev|desc' | scripts/resolution-loop.sh add-batch
+       → adds all issues in one python3 invocation (faster)
 
 6. PROGRESS CHECK  — the script handles this:
    → scripts/resolution-loop.sh status
    → prints remaining OPEN/IN_PROGRESS count
    → returns exit code 0 if done (all DONE or DEFERRED)
    → returns exit code 1 if issues remain
+   → returns exit code 2 if max iterations exceeded (force-stop)
    → agent MUST continue if exit code is 1
    → NEVER ask "should I continue?" — the script decides
+```
+
+## decision tree: what to do after each step
+
+```
+After SCAN:
+  └── issues found? ─── YES → go to PLAN
+                    └── NO  → call `status`, if exit 0 → `report`, done
+
+After FIX + VERIFY:
+  ├── verify exit 0? ─── YES → call `resolve ISS-N` → call `status`
+  │                             └── status exit 0? → `report`, done
+  │                             └── status exit 1? → go to PLAN (pick next issue)
+  │                             └── status exit 2? → `report`, done (max iterations)
+  └── verify exit != 0? ─ YES → call `fail ISS-N "<first line of verify error>"`
+                                └── output says DEFERRED? → pick next issue
+                                └── output says REQUEUED? → read failure history,
+                                    choose fundamentally different approach
+                                    └── attempt 2 failed? → re-read ENTIRE module
+                                        before attempt 3
+
+After FAIL:
+  └── was this a scope issue (verify failed on untouched file)?
+      └── YES → call `fail ISS-N "cascading scope"` — do NOT retry
+      └── NO  → retry with different approach
 ```
 
 ## issue ledger format
@@ -65,18 +94,6 @@ The script manages `.codeperfect/issues.json`:
       "status": "open",
       "attempts": 0,
       "history": []
-    },
-    {
-      "id": "ISS-2",
-      "file": "src/utils/format.ts",
-      "line": 12,
-      "severity": "medium",
-      "description": "Dead code — function never called",
-      "status": "done",
-      "attempts": 1,
-      "history": [
-        { "attempt": 1, "action": "resolved", "timestamp": "2026-03-19T10:05:00Z" }
-      ]
     }
   ]
 }
@@ -102,15 +119,29 @@ When `scripts/verify.sh` fails after a fix attempt:
 4. If the same issue has failed twice, the agent MUST re-read the entire module before attempt 3.
 5. After 3 failures, the script marks the issue `DEFERRED` with all three failure reasons.
 
+## severity priority rules
+
+The agent MUST pick issues in this order. No exceptions.
+
+| Priority | Severity | Action |
+|----------|----------|--------|
+| 1 | critical | Fix immediately. Block all other work. |
+| 2 | high | Fix next. Do not skip to medium/low. |
+| 3 | medium | Fix after all high issues are done/deferred. |
+| 4 | low | Fix last. May defer if iteration budget is tight. |
+
+**If a critical issue is added mid-loop:** Stop current work on non-critical issues. Start the critical issue next. The `status` command sorts by severity automatically.
+
 ## safety guardrails
 
 All enforced by the script, not by agent discipline:
 
 - **Max 3 attempts per issue.** The script blocks further attempts after 3 reverts. Non-negotiable.
-- **Max iterations.** Hard cap: `max(10, issue_count * 3)`. The script exits with an error if exceeded.
+- **Max iterations.** Hard cap: `max(10, issue_count * 3)`. The script exits with code 2 if exceeded.
 - **No cascading rewrites.** The agent must not modify files outside the scope of the current issue. If `scripts/verify.sh` fails, the script reverts all changes and the agent should check whether the failure is in a file it modified. If verification failures appear in untouched files, the agent should call `fail` with reason "cascading scope" and move on.
 - **Checkpoint every 5 resolved issues.** The script runs the full test suite automatically, not just changed-file tests. If new failures appear, the last 5 commits are flagged for review.
 - **Atomic commits.** The script commits after each successful resolution with message format: `fix(codeperfect): ISS-N — <description>`. The agent does not commit manually.
+- **Corruption recovery.** If `issues.json` is corrupted (invalid JSON), the script auto-recovers from `.codeperfect/issues.json.bak`. Every write creates a backup first.
 
 ## usage
 
@@ -121,6 +152,13 @@ scripts/resolution-loop.sh init src/
 # Scan for issues (populates the ledger)
 scripts/resolution-loop.sh scan src/
 
+# Add a single issue
+scripts/resolution-loop.sh add "src/auth/login.ts" "45" "critical" "SQL injection"
+
+# Add many issues at once (avoids N python3 spawns)
+echo 'src/a.ts|10|high|desc1
+src/b.ts|20|medium|desc2' | scripts/resolution-loop.sh add-batch
+
 # Mark an issue as in-progress (agent is working on it)
 scripts/resolution-loop.sh start ISS-1
 
@@ -130,10 +168,7 @@ scripts/resolution-loop.sh resolve ISS-1
 # After a failed fix (verify returned non-zero)
 scripts/resolution-loop.sh fail ISS-1 "type error: Property 'name' does not exist on type 'User'"
 
-# Add a newly discovered issue
-scripts/resolution-loop.sh add "src/api/orders.ts" "78" "medium" "Unhandled promise rejection in checkout flow"
-
-# Check loop status (exit code 0 = done, 1 = continue)
+# Check loop status (exit code 0=done, 1=continue, 2=max-iterations)
 scripts/resolution-loop.sh status
 
 # Print the final report
@@ -142,7 +177,7 @@ scripts/resolution-loop.sh report
 
 ## agent integration
 
-The agent's job in the loop is simple:
+The agent's job in the loop is mechanical. Follow this exactly:
 
 1. Read `.codeperfect/issues.json` — pick the highest-severity `OPEN` issue.
 2. Call `scripts/resolution-loop.sh start ISS-N`.
@@ -151,6 +186,9 @@ The agent's job in the loop is simple:
 5. If verify passed: call `scripts/resolution-loop.sh resolve ISS-N`.
 6. If verify failed: call `scripts/resolution-loop.sh fail ISS-N "<reason>"`.
 7. Call `scripts/resolution-loop.sh status`. If exit code 1, go to step 1.
-8. When exit code 0: call `scripts/resolution-loop.sh report`. Done.
+8. When exit code 0 or 2: call `scripts/resolution-loop.sh report`. Done.
 
 The agent never decides whether to continue. The script decides.
+The agent never edits issues.json directly. The script edits it.
+The agent never commits. The script commits.
+The agent never reverts. The script reverts.

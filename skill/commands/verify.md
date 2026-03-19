@@ -4,17 +4,42 @@ description: "Run the 8-point verification checklist — compiles, tests pass, n
 argument-hint: "[--changed-files file1.ts file2.ts ...]"
 ---
 
-EXECUTE IMMEDIATELY.
+EXECUTE IMMEDIATELY. No deliberation. No questions.
+
+## Mandatory Rules
+
+- DO NOT skip this step or treat failures as optional.
+- DO NOT modify the verify script output — report it verbatim.
+- DO NOT suggest "we can ignore this failure" — if it fails, it fails.
 
 ## Execution
 
-1. Resolve `SKILL_DIR` — find the code-perfection skill directory:
-   - Probe: `$HOME/.claude/skills/code-perfection`, `$HOME/.codex/skills/code-perfection`, `$HOME/.agents/skills/code-perfection`, `$HOME/.cursor/skills/code-perfection`, `$HOME/.kiro/skills/code-perfection`
-   - Use the first that contains `SKILL.md`
+### Step 1: Resolve SKILL_DIR
 
-2. Run the verification script:
-   ```bash
-   "$SKILL_DIR/scripts/verify.sh" $ARGUMENTS
-   ```
+Find the code-perfection skill directory by probing in order:
+- `$HOME/.claude/skills/code-perfection`
+- `$HOME/.codex/skills/code-perfection`
+- `$HOME/.agents/skills/code-perfection`
+- `$HOME/.cursor/skills/code-perfection`
+- `$HOME/.kiro/skills/code-perfection`
 
-3. Display the results to the user. If verification failed (exit code 1), list the specific failures and suggest fixes.
+Use the first that contains `SKILL.md`. If NONE found, stop and report: "Code Perfection skill not installed. Run: code-perfection install"
+
+### Step 2: Verify script exists
+
+Check that `"$SKILL_DIR/scripts/verify.sh"` exists and is executable.
+
+If missing: stop and report: "Verification script missing at $SKILL_DIR/scripts/verify.sh — reinstall the skill."
+
+If not executable: run `chmod +x "$SKILL_DIR/scripts/verify.sh"` then continue.
+
+### Step 3: Run verification
+
+```bash
+"$SKILL_DIR/scripts/verify.sh" $ARGUMENTS
+```
+
+### Step 4: Report results
+
+- If exit code 0 (PASS): display results. Report which checks passed.
+- If exit code 1 (FAIL): display results. List each specific failure. For each failure, suggest a concrete fix action (not vague advice — a specific file and change).

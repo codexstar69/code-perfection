@@ -65,8 +65,11 @@ for domain in triage.get('domains', []):
         'issues_deferred': 0
     }
 
-with open(os.environ['CP_AUDIT_STATE'], 'w') as f:
+out = os.environ['CP_AUDIT_STATE']
+tmp = out + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(state, f, indent=2)
+os.replace(tmp, out)
 print(f'Initialized audit state: {len(state[\"domains\"])} domains')
 "
   printf "${GREEN}Audit state${NC} initialized at %s\n" "$AUDIT_STATE"
@@ -173,8 +176,10 @@ if state['domains'][domain_name]['status'] == 'done':
 
 state['domains'][domain_name]['status'] = 'in_progress'
 state['last_updated'] = timestamp
-with open(audit_state, 'w') as f:
+tmp = audit_state + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(state, f, indent=2)
+os.replace(tmp, audit_state)
 print(f'Started domain: {domain_name}')
 "
   printf "${CYAN}Started${NC} domain: %s\n" "$name"
@@ -236,8 +241,10 @@ state['domains'][domain_name]['issues_deferred'] = int(os.environ['CP_DEFERRED']
 state['total_resolved'] = sum(d['issues_resolved'] for d in state['domains'].values())
 state['total_deferred'] = sum(d['issues_deferred'] for d in state['domains'].values())
 state['last_updated'] = os.environ['CP_TIMESTAMP']
-with open(audit_state, 'w') as f:
+tmp = audit_state + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(state, f, indent=2)
+os.replace(tmp, audit_state)
 "
   printf "${GREEN}Completed${NC} domain: %s (found=%d resolved=%d deferred=%d)\n" \
     "$name" "$issues_found" "$issues_resolved" "$issues_deferred"
@@ -269,12 +276,25 @@ with open(audit_state) as f:
 domain_names = list(state['domains'].keys())
 boundaries = {}
 
+# Pre-compile regex patterns for each domain to avoid recompilation per file
+SOURCE_EXTS = frozenset(('.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs'))
+SKIP_DIRS = frozenset(('node_modules', 'dist', 'build', '.git', '__pycache__', '.venv', '.codeperfect'))
+domain_patterns = {}
+for d in domain_names:
+    escaped = re.escape(d)
+    domain_patterns[d] = re.compile(
+        rf'(?:from\s+[\"\\x27]|import\s+.*[\"\\x27]|require\([\"\\x27]).*{escaped}'
+    )
+
+# Pre-compute domain path prefixes for fast lookup
+domain_prefixes = [(d, os.path.join(target, d) + os.sep) for d in domain_names]
+
 # Scan for cross-domain imports
 for root, dirs, files in os.walk(target):
-    # Skip non-source dirs
-    dirs[:] = [d for d in dirs if d not in ('node_modules', 'dist', 'build', '.git', '__pycache__', '.venv')]
+    dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
     for fname in files:
-        if not any(fname.endswith(ext) for ext in ('.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs')):
+        ext = os.path.splitext(fname)[1]
+        if ext not in SOURCE_EXTS:
             continue
         fpath = os.path.join(root, fname)
         try:
@@ -283,37 +303,32 @@ for root, dirs, files in os.walk(target):
         except Exception:
             continue
 
-        # Find which domain this file belongs to
+        # Find which domain this file belongs to using prefix match
         file_domain = None
-        for d in domain_names:
-            if fpath.startswith(os.path.join(target, d)) or ('/' + d + '/') in fpath:
+        for d, prefix in domain_prefixes:
+            if fpath.startswith(prefix):
                 file_domain = d
                 break
         if not file_domain:
             continue
 
-        # Find imports that reference other domains
+        # Find imports that reference other domains using pre-compiled patterns
         for other in domain_names:
             if other == file_domain:
                 continue
-            patterns = [
-                rf'from\s+[\"\\x27].*{re.escape(other)}',
-                rf'import\s+.*[\"\\x27].*{re.escape(other)}',
-                rf'require\([\"\\x27].*{re.escape(other)}',
-            ]
-            for pat in patterns:
-                if re.search(pat, content):
-                    key = '-'.join(sorted([file_domain, other]))
-                    if key not in boundaries:
-                        boundaries[key] = {'status': 'pending', 'files': []}
-                    if fpath not in boundaries[key]['files']:
-                        boundaries[key]['files'].append(fpath)
-                    break
+            if domain_patterns[other].search(content):
+                key = '-'.join(sorted([file_domain, other]))
+                if key not in boundaries:
+                    boundaries[key] = {'status': 'pending', 'files': []}
+                if fpath not in boundaries[key]['files']:
+                    boundaries[key]['files'].append(fpath)
 
 state['boundaries'] = boundaries
 state['last_updated'] = timestamp
-with open(audit_state, 'w') as f:
+tmp = audit_state + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(state, f, indent=2)
+os.replace(tmp, audit_state)
 
 print(f'Found {len(boundaries)} boundary pairs:')
 for key, b in sorted(boundaries.items()):
@@ -341,8 +356,10 @@ if pair not in state.get('boundaries', {}):
     sys.exit(1)
 state['boundaries'][pair]['status'] = 'in_progress'
 state['last_updated'] = os.environ['CP_TIMESTAMP']
-with open(audit_state, 'w') as f:
+tmp = audit_state + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(state, f, indent=2)
+os.replace(tmp, audit_state)
 "
   printf "${CYAN}Started${NC} boundary audit: %s\n" "$pair"
 }
@@ -364,8 +381,10 @@ with open(audit_state) as f:
     state = json.load(f)
 state['boundaries'][pair]['status'] = 'done'
 state['last_updated'] = os.environ['CP_TIMESTAMP']
-with open(audit_state, 'w') as f:
+tmp = audit_state + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(state, f, indent=2)
+os.replace(tmp, audit_state)
 "
   printf "${GREEN}Completed${NC} boundary: %s\n" "$pair"
 }
@@ -482,8 +501,10 @@ merged = {
     'issues': all_issues
 }
 
-with open(output_file, 'w') as f:
+tmp = output_file + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(merged, f, indent=2)
+os.replace(tmp, output_file)
 
 print(f'Merged {len(all_issues)} unique issues from {len(finding_files)} files')
 print(f'Written to {output_file}')

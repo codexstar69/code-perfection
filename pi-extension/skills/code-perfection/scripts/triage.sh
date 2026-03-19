@@ -71,7 +71,8 @@ for entry in sorted(os.listdir(target)):
     if entry in SKIP_DIRS or entry.startswith('.'):
         continue
 
-    # Count source files in this domain
+    # Count source files in this domain (cap stored paths at 200)
+    FILE_SAMPLE_CAP = 200
     file_count = 0
     source_files = []
     for root, dirs, files in os.walk(entry_path):
@@ -80,7 +81,8 @@ for entry in sorted(os.listdir(target)):
             ext = os.path.splitext(f)[1]
             if ext in SOURCE_EXTS:
                 file_count += 1
-                source_files.append(os.path.join(root, f))
+                if len(source_files) < FILE_SAMPLE_CAP:
+                    source_files.append(os.path.join(root, f))
 
     if file_count == 0:
         continue
@@ -91,7 +93,7 @@ for entry in sorted(os.listdir(target)):
         'path': entry_path,
         'tier': tier,
         'file_count': file_count,
-        'files': source_files[:200]  # cap for sanity
+        'files': source_files
     }
     total_files += file_count
 
@@ -137,8 +139,10 @@ triage = {
     }
 }
 
-with open(triage_file, 'w') as f:
+tmp = triage_file + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(triage, f, indent=2)
+os.replace(tmp, triage_file)
 
 # Print summary
 print(f'Total source files: {total_files}')

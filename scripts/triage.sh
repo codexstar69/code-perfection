@@ -4,63 +4,51 @@
 # Usage: scripts/triage.sh <target-dir>
 set -euo pipefail
 
-# Dependency check
-if ! command -v python3 &>/dev/null; then
-  printf "ERROR: python3 is required but not found in PATH.\n" >&2
-  exit 1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_lib.sh"
+
+check_python3
+
+# Help
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
+  cat <<'USAGE'
+Usage: scripts/triage.sh [target-dir]
+
+Structural recon without reading code. Discovers domains, classifies
+by risk tier, counts files, builds the audit roadmap.
+
+Output: .codeperfect/triage.json
+USAGE
+  exit 0
 fi
 
-STATE_DIR=".codeperfect"
-TRIAGE_FILE="$STATE_DIR/triage.json"
 TARGET="${1:-.}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+if [ ! -d "$TARGET" ]; then
+  die "Target directory does not exist: $TARGET"
+fi
 
-# Atomic JSON write helper — used by inline Python to prevent corruption on crash.
-ATOMIC_WRITE_PY='
-import tempfile
-def atomic_json_write(filepath, data):
-    import json, os
-    dir_ = os.path.dirname(os.path.abspath(filepath))
-    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp", prefix=".triage_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, filepath)
-    except BaseException:
-        try: os.unlink(tmp)
-        except OSError: pass
-        raise
-'
+ensure_state_dir
 
-mkdir -p "$STATE_DIR"
-
-printf "${CYAN}Triage${NC}: scanning %s...\n" "$TARGET"
+info_msg "Triage: scanning $TARGET..."
 
 CP_TARGET="$TARGET" CP_TRIAGE_FILE="$TRIAGE_FILE" python3 -c "
 ${ATOMIC_WRITE_PY}
-import os, json, re
+import os, json, re, sys
 
 target = os.environ['CP_TARGET']
 triage_file = os.environ['CP_TRIAGE_FILE']
 
 # Source file extensions
-SOURCE_EXTS = {'.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift', '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.vue', '.svelte'}
+SOURCE_EXTS = frozenset({'.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift', '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.vue', '.svelte'})
 
 # Directories to skip
-SKIP_DIRS = {'node_modules', 'dist', 'build', '.git', '__pycache__', '.venv', 'vendor', '.next', 'coverage', '.codeperfect'}
+SKIP_DIRS = frozenset({'node_modules', 'dist', 'build', '.git', '__pycache__', '.venv', 'vendor', '.next', 'coverage', '.codeperfect', '.tox', '.mypy_cache', '.pytest_cache', 'target', '.gradle'})
 
 # Risk tier keywords
-CRITICAL_KEYWORDS = {'auth', 'authentication', 'authorization', 'security', 'payment', 'payments', 'billing', 'checkout', 'gateway', 'middleware', 'crypto', 'token', 'session', 'oauth', 'jwt', 'password', 'credential'}
-HIGH_KEYWORDS = {'api', 'service', 'controller', 'handler', 'route', 'routes', 'model', 'models', 'database', 'db', 'store', 'state', 'core', 'engine', 'processor', 'queue', 'worker', 'job'}
-LOW_KEYWORDS = {'test', 'tests', 'spec', 'specs', '__tests__', 'fixtures', 'mocks', 'stubs', 'scripts', 'tools', 'docs', 'documentation', 'examples', 'demo', 'sample', 'migration', 'migrations', 'seed', 'seeds', 'config', 'configs'}
+CRITICAL_KEYWORDS = frozenset({'auth', 'authentication', 'authorization', 'security', 'payment', 'payments', 'billing', 'checkout', 'gateway', 'middleware', 'crypto', 'token', 'session', 'oauth', 'jwt', 'password', 'credential'})
+HIGH_KEYWORDS = frozenset({'api', 'service', 'controller', 'handler', 'route', 'routes', 'model', 'models', 'database', 'db', 'store', 'state', 'core', 'engine', 'processor', 'queue', 'worker', 'job'})
+LOW_KEYWORDS = frozenset({'test', 'tests', 'spec', 'specs', '__tests__', 'fixtures', 'mocks', 'stubs', 'scripts', 'tools', 'docs', 'documentation', 'examples', 'demo', 'sample', 'migration', 'migrations', 'seed', 'seeds', 'config', 'configs'})
 
 def classify_tier(dirname):
     lower = dirname.lower()
@@ -72,32 +60,48 @@ def classify_tier(dirname):
         return 'low'
     return 'medium'
 
-# Discover domains (top 2 levels)
+# Discover domains (top-level directories)
 domains = {}
 total_files = 0
+file_cap_per_domain = 500  # Scalability: cap stored file list
 
-for entry in sorted(os.listdir(target)):
+try:
+    entries = sorted(os.listdir(target))
+except PermissionError as e:
+    print(f'ERROR: Cannot read target directory: {e}', file=sys.stderr)
+    sys.exit(1)
+
+for entry in entries:
     entry_path = os.path.join(target, entry)
     if not os.path.isdir(entry_path):
         continue
     if entry in SKIP_DIRS or entry.startswith('.'):
         continue
-    # Sanitize domain name: replace spaces and special chars with underscores
-    # to prevent issues with shell commands and directory creation
+    # Sanitize domain name
     safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', entry)
     if safe_name != entry:
         print(f'  NOTE: Renamed domain \"{entry}\" -> \"{safe_name}\" (sanitized)')
 
-    # Count source files in this domain
+    # Count source files using os.scandir for speed on large trees
     file_count = 0
     source_files = []
-    for root, dirs, files in os.walk(entry_path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith('.')]
-        for f in files:
-            ext = os.path.splitext(f)[1]
-            if ext in SOURCE_EXTS:
-                file_count += 1
-                source_files.append(os.path.join(root, f))
+    stack = [entry_path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for e in it:
+                    if e.is_dir(follow_symlinks=False):
+                        if e.name not in SKIP_DIRS and not e.name.startswith('.'):
+                            stack.append(e.path)
+                    elif e.is_file(follow_symlinks=False):
+                        ext = os.path.splitext(e.name)[1]
+                        if ext in SOURCE_EXTS:
+                            file_count += 1
+                            if len(source_files) < file_cap_per_domain:
+                                source_files.append(e.path)
+        except PermissionError:
+            continue
 
     if file_count == 0:
         continue
@@ -108,17 +112,20 @@ for entry in sorted(os.listdir(target)):
         'path': entry_path,
         'tier': tier,
         'file_count': file_count,
-        'files': source_files[:200]  # cap for sanity
+        'files': source_files
     }
     total_files += file_count
 
-# Also check for source files directly in target (not in subdirectories)
+# Root-level source files
 root_files = []
-for f in os.listdir(target):
-    fpath = os.path.join(target, f)
-    if os.path.isfile(fpath) and os.path.splitext(f)[1] in SOURCE_EXTS:
-        root_files.append(fpath)
-        total_files += 1
+try:
+    with os.scandir(target) as it:
+        for e in it:
+            if e.is_file(follow_symlinks=False) and os.path.splitext(e.name)[1] in SOURCE_EXTS:
+                root_files.append(e.path)
+                total_files += 1
+except PermissionError:
+    pass
 
 if root_files:
     domains['_root'] = {
@@ -133,10 +140,14 @@ if root_files:
 tier_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
 sorted_domains = sorted(domains.values(), key=lambda d: (tier_order.get(d['tier'], 99), d['name']))
 
-# Compute scan order (all files, priority-ordered)
+# Compute scan order (priority-ordered, capped for scalability)
 scan_order = []
+scan_cap = 2000
 for d in sorted_domains:
-    scan_order.extend(d.get('files', []))
+    remaining = scan_cap - len(scan_order)
+    if remaining <= 0:
+        break
+    scan_order.extend(d.get('files', [])[:remaining])
 
 # Build triage output
 triage = {
@@ -145,7 +156,7 @@ triage = {
     'total_files': total_files,
     'domain_count': len(domains),
     'domains': [{'name': d['name'], 'path': d['path'], 'tier': d['tier'], 'file_count': d['file_count']} for d in sorted_domains],
-    'scan_order': scan_order[:500],
+    'scan_order': scan_order,
     'tier_summary': {
         'critical': sum(1 for d in domains.values() if d['tier'] == 'critical'),
         'high': sum(1 for d in domains.values() if d['tier'] == 'high'),
@@ -154,7 +165,7 @@ triage = {
     }
 }
 
-atomic_json_write(triage_file, triage)
+atomic_json_write_with_backup(triage_file, triage)
 
 # Print summary
 print(f'Total source files: {total_files}')
@@ -166,4 +177,4 @@ for d in sorted_domains:
     print(f'  [{d[\"tier\"]:>8}] {d[\"name\"]:30s} {d[\"file_count\"]:>4} files')
 "
 
-printf "\n${GREEN}Triage${NC} written to %s\n" "$TRIAGE_FILE"
+ok_msg "Triage written to $TRIAGE_FILE"

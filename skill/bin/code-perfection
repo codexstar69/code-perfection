@@ -12,11 +12,14 @@
  *   code-perfection install --agent pi
  *   code-perfection uninstall        # Remove from all agents
  *   code-perfection status           # Show install status
+ *   code-perfection verify           # Verify installed files match source
+ *   code-perfection sync             # Re-sync only changed files
  */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const SKILL_NAME = 'code-perfection';
 const HOME = os.homedir();
@@ -44,6 +47,7 @@ const REFERENCE_FILES = [
 ];
 
 const SCRIPT_FILES = [
+  { src: path.join('..', 'scripts', '_lib.sh'), dst: path.join('scripts', '_lib.sh') },
   { src: path.join('..', 'scripts', 'verify.sh'), dst: path.join('scripts', 'verify.sh') },
   { src: path.join('..', 'scripts', 'resolution-loop.sh'), dst: path.join('scripts', 'resolution-loop.sh') },
   { src: path.join('..', 'scripts', 'audit-state.sh'), dst: path.join('scripts', 'audit-state.sh') },
@@ -55,6 +59,22 @@ const COMMAND_FILES = [
   { src: path.join('commands', 'audit.md'), dst: 'audit.md' },
   { src: path.join('commands', 'verify.md'), dst: 'verify.md' },
 ];
+
+const ALL_FILE_GROUPS = [
+  { name: 'skill', files: SKILL_FILES, targetKey: 'skillDir' },
+  { name: 'references', files: REFERENCE_FILES, targetKey: 'skillDir' },
+  { name: 'scripts', files: SCRIPT_FILES, targetKey: 'skillDir' },
+  { name: 'commands', files: COMMAND_FILES, targetKey: 'cmdDir' },
+];
+
+function fileHash(filepath) {
+  try {
+    const content = fs.readFileSync(filepath);
+    return crypto.createHash('sha256').update(content).digest('hex').slice(0, 12);
+  } catch {
+    return null;
+  }
+}
 
 function copyFile(src, dst) {
   const srcPath = path.resolve(SCRIPT_DIR, src);
@@ -73,6 +93,30 @@ function copyFile(src, dst) {
   return true;
 }
 
+function copyFileIfChanged(src, dst) {
+  const srcPath = path.resolve(SCRIPT_DIR, src);
+  if (!fs.existsSync(srcPath)) {
+    console.error(`  SKIP: ${src} (source not found)`);
+    return { copied: false, reason: 'missing' };
+  }
+
+  const srcHash = fileHash(srcPath);
+  const dstHash = fileHash(dst);
+
+  if (srcHash === dstHash && dstHash !== null) {
+    return { copied: false, reason: 'unchanged' };
+  }
+
+  const dstDir = path.dirname(dst);
+  fs.mkdirSync(dstDir, { recursive: true });
+  fs.copyFileSync(srcPath, dst);
+
+  if (dst.endsWith('.sh')) {
+    fs.chmodSync(dst, 0o755);
+  }
+  return { copied: true, reason: dstHash === null ? 'new' : 'updated' };
+}
+
 function installAgent(agent) {
   const parentDir = path.dirname(agent.skillDir);
   if (!fs.existsSync(path.dirname(parentDir))) {
@@ -87,34 +131,60 @@ function installAgent(agent) {
   fs.mkdirSync(agent.cmdDir, { recursive: true });
 
   let count = 0;
+  let skipped = [];
 
-  // Skill files
-  for (const f of SKILL_FILES) {
-    if (copyFile(f.src, path.join(agent.skillDir, f.dst))) count++;
+  for (const group of ALL_FILE_GROUPS) {
+    const targetDir = agent[group.targetKey];
+    for (const f of group.files) {
+      if (copyFile(f.src, path.join(targetDir, f.dst))) {
+        count++;
+      } else {
+        skipped.push(f.src);
+      }
+    }
   }
 
-  // Reference files
-  for (const f of REFERENCE_FILES) {
-    if (copyFile(f.src, path.join(agent.skillDir, f.dst))) count++;
-  }
-
-  // Script files
-  for (const f of SCRIPT_FILES) {
-    if (copyFile(f.src, path.join(agent.skillDir, f.dst))) count++;
-  }
-
-  // Command files
-  for (const f of COMMAND_FILES) {
-    if (copyFile(f.src, path.join(agent.cmdDir, f.dst))) count++;
-  }
-
-  const expected = SKILL_FILES.length + REFERENCE_FILES.length + SCRIPT_FILES.length + COMMAND_FILES.length;
+  const expected = ALL_FILE_GROUPS.reduce((sum, g) => sum + g.files.length, 0);
   if (count < expected) {
-    console.warn(`    WARNING: ${count}/${expected} files installed (${expected - count} source files missing)`);
+    console.warn(`    WARNING: ${count}/${expected} files installed`);
+    if (skipped.length > 0) {
+      console.warn(`    Missing source files: ${skipped.join(', ')}`);
+    }
   } else {
     console.log(`    ${count} files installed`);
   }
   return count > 0;
+}
+
+function syncAgent(agent) {
+  if (!fs.existsSync(path.join(agent.skillDir, 'SKILL.md'))) {
+    console.log(`  SKIP: ${agent.name} (not installed)`);
+    return false;
+  }
+
+  console.log(`  Syncing ${agent.name}...`);
+  let updated = 0;
+  let unchanged = 0;
+
+  for (const group of ALL_FILE_GROUPS) {
+    const targetDir = agent[group.targetKey];
+    for (const f of group.files) {
+      const result = copyFileIfChanged(f.src, path.join(targetDir, f.dst));
+      if (result.copied) {
+        console.log(`    ${result.reason}: ${f.dst}`);
+        updated++;
+      } else if (result.reason === 'unchanged') {
+        unchanged++;
+      }
+    }
+  }
+
+  if (updated === 0) {
+    console.log(`    All ${unchanged} files up to date`);
+  } else {
+    console.log(`    ${updated} files updated, ${unchanged} unchanged`);
+  }
+  return updated > 0;
 }
 
 function uninstallAgent(agent) {
@@ -135,15 +205,59 @@ function uninstallAgent(agent) {
   return removed;
 }
 
+function verifyAgent(agent) {
+  if (!fs.existsSync(path.join(agent.skillDir, 'SKILL.md'))) {
+    console.log(`  ${agent.name}: NOT INSTALLED`);
+    return { installed: false, ok: 0, mismatch: 0, missing: 0 };
+  }
+
+  let ok = 0;
+  let mismatch = 0;
+  let missing = 0;
+
+  for (const group of ALL_FILE_GROUPS) {
+    const targetDir = agent[group.targetKey];
+    for (const f of group.files) {
+      const srcPath = path.resolve(SCRIPT_DIR, f.src);
+      const dstPath = path.join(targetDir, f.dst);
+      const srcHash = fileHash(srcPath);
+      const dstHash = fileHash(dstPath);
+
+      if (srcHash === null) {
+        // Source missing — can't verify
+        continue;
+      }
+      if (dstHash === null) {
+        console.log(`    MISSING: ${f.dst}`);
+        missing++;
+      } else if (srcHash !== dstHash) {
+        console.log(`    MISMATCH: ${f.dst} (src: ${srcHash}, dst: ${dstHash})`);
+        mismatch++;
+      } else {
+        ok++;
+      }
+    }
+  }
+
+  const status = (mismatch === 0 && missing === 0) ? 'OK' : 'OUT OF SYNC';
+  console.log(`  ${agent.name}: ${status} (${ok} ok, ${mismatch} mismatched, ${missing} missing)`);
+  return { installed: true, ok, mismatch, missing };
+}
+
 function statusAgent(agent) {
   const skillExists = fs.existsSync(path.join(agent.skillDir, 'SKILL.md'));
   const cmdExists = fs.existsSync(agent.cmdDir);
   const scriptsExist = fs.existsSync(path.join(agent.skillDir, 'scripts', 'verify.sh'));
+  const refsExist = fs.existsSync(path.join(agent.skillDir, 'references', 'agents.md'));
 
-  if (skillExists && scriptsExist) {
+  if (skillExists && scriptsExist && refsExist) {
     console.log(`  ${agent.name}: INSTALLED (${agent.skillDir})`);
   } else if (skillExists) {
-    console.log(`  ${agent.name}: PARTIAL (missing scripts)`);
+    const missing = [];
+    if (!scriptsExist) missing.push('scripts');
+    if (!refsExist) missing.push('references');
+    if (!cmdExists) missing.push('commands');
+    console.log(`  ${agent.name}: PARTIAL (missing: ${missing.join(', ')})`);
   } else {
     const parentExists = fs.existsSync(path.dirname(path.dirname(agent.skillDir)));
     console.log(`  ${agent.name}: NOT INSTALLED${parentExists ? '' : ' (agent not detected)'}`);
@@ -188,12 +302,40 @@ switch (command) {
     }
     break;
   }
+  case 'sync': {
+    console.log('Syncing Code Perfection skill (only changed files)...');
+    let synced = 0;
+    for (const agent of targetAgents) {
+      if (syncAgent(agent)) synced++;
+    }
+    console.log(`\nDone: ${synced} agent(s) had updates.`);
+    break;
+  }
   case 'uninstall': {
     console.log(`Uninstalling Code Perfection skill...`);
     for (const agent of targetAgents) {
       uninstallAgent(agent);
     }
     console.log('Done.');
+    break;
+  }
+  case 'verify': {
+    console.log('Verifying installed files match source...');
+    let totalMismatch = 0;
+    let totalMissing = 0;
+    for (const agent of targetAgents) {
+      const result = verifyAgent(agent);
+      if (result.installed) {
+        totalMismatch += result.mismatch;
+        totalMissing += result.missing;
+      }
+    }
+    if (totalMismatch > 0 || totalMissing > 0) {
+      console.log(`\nFiles out of sync. Run: code-perfection sync`);
+      process.exit(1);
+    } else {
+      console.log('\nAll installed files match source.');
+    }
     break;
   }
   case 'status': {
@@ -207,7 +349,9 @@ switch (command) {
     console.log(`Code Perfection — Autonomous Refactoring Agent\n`);
     console.log('Usage:');
     console.log('  code-perfection install [--agent <name>]    Install the skill');
+    console.log('  code-perfection sync [--agent <name>]       Sync only changed files');
     console.log('  code-perfection uninstall [--agent <name>]  Remove the skill');
+    console.log('  code-perfection verify [--agent <name>]     Verify files match source');
     console.log('  code-perfection status                      Show install status');
     console.log(`\nAgents: ${AGENTS.map(a => a.name).join(', ')}`);
 }

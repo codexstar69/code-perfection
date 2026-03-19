@@ -4,10 +4,10 @@
 # Usage: scripts/verify.sh [--changed-files file1.ts file2.ts ...]
 set -euo pipefail
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-NC='\033[0m'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/_lib.sh"
+
+START_TIME=$SECONDS
 
 # git is used for detecting changed files but is not strictly required —
 # the script can still run with --changed-files.  We note its absence so
@@ -40,7 +40,7 @@ check() {
   fi
 }
 
-warn() {
+warn_check() {
   local name="$1"
   local detail="${2:-}"
   printf "${YELLOW}WARN${NC}  %s\n" "$name"
@@ -80,11 +80,28 @@ if [ -f "package.json" ]; then
     BUILD_CMD=""
   fi
 
+  # Verify the typecheck script actually exists in package.json before running
+  if [ -n "$BUILD_CMD" ]; then
+    if [[ "$BUILD_CMD" == "bun run typecheck" ]]; then
+      HAS_TYPECHECK=$(node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.typecheck ? 0 : 1)" 2>/dev/null && echo "yes" || echo "no")
+      if [ "$HAS_TYPECHECK" = "no" ]; then
+        # Fall back to direct tsc if typecheck script missing
+        if command -v npx &>/dev/null; then
+          BUILD_CMD="npx tsc --noEmit"
+        elif [ -f "node_modules/.bin/tsc" ]; then
+          BUILD_CMD="node_modules/.bin/tsc --noEmit"
+        else
+          BUILD_CMD=""
+        fi
+      fi
+    fi
+  fi
+
   if [ -n "$BUILD_CMD" ]; then
     BUILD_OUTPUT=$($BUILD_CMD 2>&1) || BUILD_RESULT=$?
     check "Compiles (typecheck)" "$BUILD_RESULT" "$( [ $BUILD_RESULT -ne 0 ] && echo "$BUILD_OUTPUT" | head -5 )"
   else
-    warn "Compiles" "No TypeScript compiler found — skipping typecheck"
+    warn_check "Compiles" "No TypeScript compiler found — skipping typecheck"
   fi
 elif [ -f "Cargo.toml" ]; then
   BUILD_OUTPUT=$(cargo check 2>&1) || BUILD_RESULT=$?
@@ -97,21 +114,21 @@ elif [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
     BUILD_OUTPUT=$(mypy . 2>&1) || BUILD_RESULT=$?
     check "Compiles (mypy)" "$BUILD_RESULT" "$( [ $BUILD_RESULT -ne 0 ] && echo "$BUILD_OUTPUT" | head -5 )"
   else
-    warn "Compiles" "No type checker found for Python — skipping"
+    warn_check "Compiles" "No type checker found for Python — skipping"
   fi
 elif [ -f "mix.exs" ]; then
   if command -v mix &>/dev/null; then
     BUILD_OUTPUT=$(mix compile --warnings-as-errors 2>&1) || BUILD_RESULT=$?
     check "Compiles (mix compile)" "$BUILD_RESULT" "$( [ $BUILD_RESULT -ne 0 ] && echo "$BUILD_OUTPUT" | head -5 )"
   else
-    warn "Compiles" "mix not found — skipping"
+    warn_check "Compiles" "mix not found — skipping"
   fi
 elif [ -f "CMakeLists.txt" ]; then
   if command -v cmake &>/dev/null; then
     BUILD_OUTPUT=$(cmake --build . 2>&1) || BUILD_RESULT=$?
     check "Compiles (cmake)" "$BUILD_RESULT" "$( [ $BUILD_RESULT -ne 0 ] && echo "$BUILD_OUTPUT" | head -5 )"
   else
-    warn "Compiles" "cmake not found — skipping"
+    warn_check "Compiles" "cmake not found — skipping"
   fi
 elif [ -f "Makefile" ] || [ -f "makefile" ]; then
   BUILD_OUTPUT=$(make -n 2>&1) || BUILD_RESULT=$?
@@ -120,7 +137,7 @@ elif [ -f "Makefile" ] || [ -f "makefile" ]; then
   fi
   check "Compiles (make)" "$BUILD_RESULT" "$( [ $BUILD_RESULT -ne 0 ] && echo "$BUILD_OUTPUT" | head -5 )"
 else
-  warn "Compiles" "No recognized build system — skipping typecheck"
+  warn_check "Compiles" "No recognized build system — skipping typecheck"
 fi
 
 # 2. TESTS PASS — detect test runner and run it
@@ -136,7 +153,7 @@ if [ -f "package.json" ]; then
     fi
     check "Tests pass" "$TEST_RESULT" "$( [ $TEST_RESULT -ne 0 ] && echo "$TEST_OUTPUT" | tail -10 )"
   else
-    warn "Tests pass" "No test script in package.json — skipping"
+    warn_check "Tests pass" "No test script in package.json — skipping"
   fi
 elif [ -f "Cargo.toml" ]; then
   TEST_OUTPUT=$(cargo test 2>&1) || TEST_RESULT=$?
@@ -149,14 +166,14 @@ elif [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
     TEST_OUTPUT=$(pytest 2>&1) || TEST_RESULT=$?
     check "Tests pass" "$TEST_RESULT" "$( [ $TEST_RESULT -ne 0 ] && echo "$TEST_OUTPUT" | tail -10 )"
   else
-    warn "Tests pass" "No test runner found — skipping"
+    warn_check "Tests pass" "No test runner found — skipping"
   fi
 elif [ -f "mix.exs" ]; then
   if command -v mix &>/dev/null; then
     TEST_OUTPUT=$(mix test 2>&1) || TEST_RESULT=$?
     check "Tests pass" "$TEST_RESULT" "$( [ $TEST_RESULT -ne 0 ] && echo "$TEST_OUTPUT" | tail -10 )"
   else
-    warn "Tests pass" "mix not found — skipping"
+    warn_check "Tests pass" "mix not found — skipping"
   fi
 elif [ -f "Makefile" ] || [ -f "makefile" ]; then
   # Check if Makefile has a test target
@@ -164,10 +181,10 @@ elif [ -f "Makefile" ] || [ -f "makefile" ]; then
     TEST_OUTPUT=$(make test 2>&1) || TEST_RESULT=$?
     check "Tests pass" "$TEST_RESULT" "$( [ $TEST_RESULT -ne 0 ] && echo "$TEST_OUTPUT" | tail -10 )"
   else
-    warn "Tests pass" "No test target in Makefile — skipping"
+    warn_check "Tests pass" "No test target in Makefile — skipping"
   fi
 else
-  warn "Tests pass" "No recognized test framework — skipping"
+  warn_check "Tests pass" "No recognized test framework — skipping"
 fi
 
 # 3. NO NEW `any` — check changed TypeScript files
@@ -253,7 +270,7 @@ fi
 if [ "$CHANGED_COUNT" -gt 20 ]; then
   check "No scope creep" 1 "${CHANGED_COUNT} files changed — exceeds hard limit of 20"
 elif [ "$CHANGED_COUNT" -gt 10 ]; then
-  warn "Scope creep" "${CHANGED_COUNT} files changed — review for scope creep"
+  warn_check "Scope creep" "${CHANGED_COUNT} files changed — review for scope creep"
 else
   check "No scope creep" 0
 fi
@@ -265,8 +282,10 @@ fi
 # (listed in agents.md verification checklist as item 3)
 
 # Summary
+ELAPSED=$((SECONDS - START_TIME))
 printf "\n=== Results ===\n"
-printf "PASS: %d  |  FAIL: %d  |  WARN: %d\n" "$PASS" "$FAIL" "$WARN"
+printf "PASS: %d  |  FAIL: %d  |  WARN: %d  |  Time: %ds\n" "$PASS" "$FAIL" "$WARN" "$ELAPSED"
+printf "Files checked: %d\n" "$CHANGED_COUNT"
 
 if [ "$FAIL" -gt 0 ]; then
   printf "${RED}VERIFICATION FAILED${NC}\n"
