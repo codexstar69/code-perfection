@@ -118,6 +118,14 @@ function getUser(id: string) {}
 function getUserIncludingDeleted(id: string) {}
 ```
 
+### modules and dependencies
+
+- Keep imports minimal. Import only what you use.
+- Prefer named imports over namespace imports (`import * as`) unless the namespace is conventional (e.g., `path`, `fs`).
+- Do not introduce circular dependencies. If module A imports from B and B needs something from A, extract the shared piece into a third module.
+- Group imports logically: external packages first, then internal modules, then relative imports.
+- Do not re-export from index files unless the project already follows that pattern.
+
 ### dead code and duplication
 
 - Remove dead code immediately. Do not comment it out "for reference" — git history preserves it.
