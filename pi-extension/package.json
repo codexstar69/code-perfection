@@ -4,6 +4,11 @@
   "description": "Autonomous code refactoring with enforced resolution loops, zero-regression verification, and large codebase audit strategy",
   "keywords": ["pi-package"],
   "license": "MIT",
+  "files": [
+    "extensions",
+    "skills",
+    "prompts"
+  ],
   "pi": {
     "extensions": ["./extensions"],
     "skills": ["./skills"],

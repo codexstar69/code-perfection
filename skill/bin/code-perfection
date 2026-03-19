@@ -108,8 +108,13 @@ function installAgent(agent) {
     if (copyFile(f.src, path.join(agent.cmdDir, f.dst))) count++;
   }
 
-  console.log(`    ${count} files installed`);
-  return true;
+  const expected = SKILL_FILES.length + REFERENCE_FILES.length + SCRIPT_FILES.length + COMMAND_FILES.length;
+  if (count < expected) {
+    console.warn(`    WARNING: ${count}/${expected} files installed (${expected - count} source files missing)`);
+  } else {
+    console.log(`    ${count} files installed`);
+  }
+  return count > 0;
 }
 
 function uninstallAgent(agent) {
@@ -162,6 +167,13 @@ if (agentFilter && targetAgents.length === 0) {
 
 switch (command) {
   case 'install': {
+    // Pre-flight: verify source files are accessible
+    const skillMdPath = path.resolve(SCRIPT_DIR, 'SKILL.md');
+    if (!fs.existsSync(skillMdPath)) {
+      console.error(`ERROR: Source SKILL.md not found at ${skillMdPath}`);
+      console.error('The installer must be run from the skill directory or via the bin/ symlink.');
+      process.exit(1);
+    }
     console.log(`Installing Code Perfection skill...`);
     let installed = 0;
     for (const agent of targetAgents) {

@@ -240,7 +240,9 @@ for issue in data['issues']:
     git add --update -- ':!.codeperfect'
     # Only commit if there are staged changes
     if ! git diff --cached --quiet 2>/dev/null; then
-      if ! git commit -m "fix(codeperfect): $id — $desc"; then
+      local commit_msg
+      commit_msg=$(printf 'fix(codeperfect): %s — %s' "$id" "$desc")
+      if ! git commit -m "$commit_msg"; then
         printf "${YELLOW}WARN${NC}: git commit failed for %s — changes are staged but not committed\n" "$id"
       fi
     fi
@@ -287,6 +289,7 @@ cmd_fail() {
     printf "${YELLOW}Reverted${NC} tracked file changes (untracked files preserved)\n"
   fi
 
+  local fail_result=0
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" CP_REASON="$reason" \
   CP_TIMESTAMP="$timestamp" CP_MAX="$MAX_ATTEMPTS" \
   python3 -c "
@@ -330,8 +333,9 @@ if not found:
     sys.exit(1)
 with open(issues_file, 'w') as f:
     json.dump(data, f, indent=2)
-"
+" || fail_result=$?
   release_lock
+  [ "$fail_result" -ne 0 ] && exit "$fail_result"
 }
 
 cmd_status() {

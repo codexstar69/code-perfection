@@ -21,6 +21,27 @@ LOCK_FILE="$STATE_DIR/fix.lock"
 ITERATION_FILE="$STATE_DIR/iteration-count"
 MAX_ATTEMPTS=3
 
+# Atomic JSON write helper — used by inline Python to prevent corruption on crash.
+# Writes to a temp file then renames (atomic on POSIX).
+ATOMIC_WRITE_PY='
+import tempfile
+def atomic_json_write(filepath, data):
+    import json, os
+    dir_ = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp", prefix=".issues_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, filepath)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+'
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -33,38 +54,58 @@ ensure_state_dir() {
 
 ensure_issues_file() {
   if [ ! -f "$ISSUES_FILE" ]; then
-    printf '{"version":1,"created":"%s","issues":[]}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ISSUES_FILE"
+    ensure_state_dir
+    printf '{"version":1,"created":"%s","target":".","issues":[]}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ISSUES_FILE"
   fi
 }
 
 cleanup_lock() {
-  # Only remove lockfile if we are the owner
-  if [ -f "$LOCK_FILE" ]; then
+  # Only remove lock dir if we are the owner (PID file matches ours)
+  if [ -d "$LOCK_FILE" ]; then
     local lock_pid
-    lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    lock_pid=$(cat "$LOCK_FILE/pid" 2>/dev/null || echo "")
     if [ "$lock_pid" = "$$" ]; then
-      rm -f "$LOCK_FILE"
+      rm -rf "$LOCK_FILE"
     fi
   fi
 }
 
 acquire_lock() {
-  if [ -f "$LOCK_FILE" ]; then
-    local pid
-    pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      printf "${RED}ERROR${NC}: Lock held by PID %s. Another resolution loop is running.\n" "$pid"
+  ensure_state_dir
+  if [ -d "$LOCK_FILE" ]; then
+    # Check issue state: if any issue is in_progress, the lock is legitimate
+    # even if the original PID is gone (cross-invocation lock).
+    local has_in_progress=false
+    if [ -f "$ISSUES_FILE" ]; then
+      has_in_progress=$(CP_ISSUES_FILE="$ISSUES_FILE" python3 -c "
+import json, os
+with open(os.environ['CP_ISSUES_FILE']) as f:
+    data = json.load(f)
+print('true' if any(i['status'] == 'in_progress' for i in data['issues']) else 'false')
+" 2>/dev/null || echo "false")
+    fi
+    if [ "$has_in_progress" = "true" ]; then
+      printf "${RED}ERROR${NC}: Lock held — an issue is already in_progress. Resolve or fail it first.\n"
       exit 1
     fi
-    printf "${YELLOW}WARN${NC}: Stale lock found (PID %s not running). Removing.\n" "$pid"
-    rm -f "$LOCK_FILE"
+    printf "${YELLOW}WARN${NC}: Stale lock found (no in_progress issues). Removing.\n"
+    rm -rf "$LOCK_FILE"
   fi
-  echo $$ > "$LOCK_FILE"
-  trap cleanup_lock EXIT INT TERM
+  # mkdir is atomic on POSIX — two processes cannot both succeed
+  if ! mkdir "$LOCK_FILE" 2>/dev/null; then
+    printf "${RED}ERROR${NC}: Failed to acquire lock (race condition). Retry.\n"
+    exit 1
+  fi
+  echo $$ > "$LOCK_FILE/pid"
+  # Do NOT set EXIT trap — the lock must persist across script invocations
+  # (start -> resolve/fail are separate invocations). Only SIGINT/SIGTERM
+  # during the start command itself should clean up.
+  trap 'cleanup_lock; exit 130' INT
+  trap 'cleanup_lock; exit 143' TERM
 }
 
 release_lock() {
-  rm -f "$LOCK_FILE"
+  rm -rf "$LOCK_FILE"
 }
 
 # Generate next issue ID
@@ -108,6 +149,7 @@ cmd_add() {
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" CP_FILE="$file" \
   CP_LINE="$line" CP_SEVERITY="$severity" CP_DESC="$description" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 issues_file = os.environ['CP_ISSUES_FILE']
 with open(issues_file) as f:
@@ -122,8 +164,7 @@ data['issues'].append({
     'attempts': 0,
     'history': []
 })
-with open(issues_file, 'w') as f:
-    json.dump(data, f, indent=2)
+atomic_json_write(issues_file, data)
 "
   printf "${GREEN}Added${NC} %s [%s] %s:%s — %s\n" "$id" "$severity" "$file" "$line" "$description"
 }
@@ -148,6 +189,7 @@ cmd_start() {
   local start_result=0
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" CP_MAX="$MAX_ATTEMPTS" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 issues_file = os.environ['CP_ISSUES_FILE']
 issue_id = os.environ['CP_ID']
@@ -164,8 +206,7 @@ for issue in data['issues']:
             print(f'ERROR: {issue_id} has exhausted all {max_attempts} attempts — auto-deferring')
             issue['status'] = 'deferred'
             issue['history'].append({'attempt': issue['attempts'], 'action': 'auto-deferred', 'reason': 'max attempts reached'})
-            with open(issues_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            atomic_json_write(issues_file, data)
             sys.exit(1)
         issue['status'] = 'in_progress'
         found = True
@@ -173,8 +214,7 @@ for issue in data['issues']:
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-with open(issues_file, 'w') as f:
-    json.dump(data, f, indent=2)
+atomic_json_write(issues_file, data)
 " || start_result=$?
 
   if [ "$start_result" -ne 0 ]; then
@@ -195,6 +235,7 @@ cmd_resolve() {
 
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 issues_file = os.environ['CP_ISSUES_FILE']
 issue_id = os.environ['CP_ID']
@@ -219,8 +260,7 @@ for issue in data['issues']:
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-with open(issues_file, 'w') as f:
-    json.dump(data, f, indent=2)
+atomic_json_write(issues_file, data)
 " || { release_lock; exit 1; }
 
   # Auto-commit the fix
@@ -240,7 +280,8 @@ for issue in data['issues']:
     git add --update -- ':!.codeperfect'
     # Only commit if there are staged changes
     if ! git diff --cached --quiet 2>/dev/null; then
-      if ! git commit -m "fix(codeperfect): $id — $desc"; then
+      # Use -F - to avoid shell interpretation issues with special chars in desc
+      if ! printf 'fix(codeperfect): %s — %s' "$id" "$desc" | git commit -F -; then
         printf "${YELLOW}WARN${NC}: git commit failed for %s — changes are staged but not committed\n" "$id"
       fi
     fi
@@ -276,6 +317,30 @@ cmd_fail() {
   local timestamp
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+  # Validate issue status BEFORE reverting to avoid destroying work
+  # if this is called on a done/deferred issue by mistake.
+  ensure_issues_file
+  local status_check=0
+  CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" python3 -c "
+import json, os, sys
+with open(os.environ['CP_ISSUES_FILE']) as f:
+    data = json.load(f)
+for issue in data['issues']:
+    if issue['id'] == os.environ['CP_ID']:
+        if issue['status'] not in ('in_progress', 'open'):
+            print(f'ERROR: {os.environ[\"CP_ID\"]} has status \"{issue[\"status\"]}\" — cannot fail')
+            sys.exit(1)
+        sys.exit(0)
+print(f'ERROR: {os.environ[\"CP_ID\"]} not found')
+sys.exit(1)
+" || status_check=$?
+
+  if [ "$status_check" -ne 0 ]; then
+    printf "${RED}Skipping revert${NC} — issue status does not permit fail operation.\n"
+    release_lock
+    exit 1
+  fi
+
   # Revert tracked file changes only. Do NOT run git clean — it would
   # destroy untracked user files (new files, scratch work, etc.).
   # Only remove files that the agent created during this attempt by
@@ -290,6 +355,7 @@ cmd_fail() {
   CP_ISSUES_FILE="$ISSUES_FILE" CP_ID="$id" CP_REASON="$reason" \
   CP_TIMESTAMP="$timestamp" CP_MAX="$MAX_ATTEMPTS" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 issues_file = os.environ['CP_ISSUES_FILE']
 issue_id = os.environ['CP_ID']
@@ -328,8 +394,7 @@ for issue in data['issues']:
 if not found:
     print(f'ERROR: {issue_id} not found')
     sys.exit(1)
-with open(issues_file, 'w') as f:
-    json.dump(data, f, indent=2)
+atomic_json_write(issues_file, data)
 "
   release_lock
 }

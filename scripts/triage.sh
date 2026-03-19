@@ -20,11 +20,32 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Atomic JSON write helper — used by inline Python to prevent corruption on crash.
+ATOMIC_WRITE_PY='
+import tempfile
+def atomic_json_write(filepath, data):
+    import json, os
+    dir_ = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp", prefix=".triage_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, filepath)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+'
+
 mkdir -p "$STATE_DIR"
 
 printf "${CYAN}Triage${NC}: scanning %s...\n" "$TARGET"
 
 CP_TARGET="$TARGET" CP_TRIAGE_FILE="$TRIAGE_FILE" python3 -c "
+${ATOMIC_WRITE_PY}
 import os, json, re
 
 target = os.environ['CP_TARGET']
@@ -61,6 +82,11 @@ for entry in sorted(os.listdir(target)):
         continue
     if entry in SKIP_DIRS or entry.startswith('.'):
         continue
+    # Sanitize domain name: replace spaces and special chars with underscores
+    # to prevent issues with shell commands and directory creation
+    safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', entry)
+    if safe_name != entry:
+        print(f'  NOTE: Renamed domain \"{entry}\" -> \"{safe_name}\" (sanitized)')
 
     # Count source files in this domain
     file_count = 0
@@ -77,8 +103,8 @@ for entry in sorted(os.listdir(target)):
         continue
 
     tier = classify_tier(entry)
-    domains[entry] = {
-        'name': entry,
+    domains[safe_name] = {
+        'name': safe_name,
         'path': entry_path,
         'tier': tier,
         'file_count': file_count,
@@ -128,8 +154,7 @@ triage = {
     }
 }
 
-with open(triage_file, 'w') as f:
-    json.dump(triage, f, indent=2)
+atomic_json_write(triage_file, triage)
 
 # Print summary
 print(f'Total source files: {total_files}')

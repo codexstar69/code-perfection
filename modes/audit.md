@@ -45,7 +45,7 @@ scripts/resolution-loop.sh init src/auth/
 scripts/resolution-loop.sh scan src/auth/
 
 # Resolution loop runs until domain issues are all DONE/DEFERRED
-# (see modes/resolution-loop.md)
+# (see references/resolution-loop.md)
 
 # Mark domain as complete
 scripts/audit-state.sh complete-domain auth
@@ -66,7 +66,7 @@ After all individual domains are audited, run a focused pass on service boundari
 # Discover boundary files (files that import from other domains)
 scripts/audit-state.sh find-boundaries src/
 
-# Output: .codeperfect/boundaries.json with boundary pairs
+# Output: boundaries stored in .codeperfect/audit-state.json under "boundaries" key
 ```
 
 For each boundary pair, read files from BOTH domains simultaneously and check for:

@@ -4,11 +4,11 @@ Instructions for autonomous code refactoring and optimization. Every change must
 
 **System enforcement:** This document defines the rules. The `scripts/` directory enforces them mechanically. Agents do not choose whether to follow the loop — the scripts drive execution.
 
-**Loading strategy:** This file is always loaded. Mode files in `modes/` are loaded on demand based on task type:
+**Loading strategy:** This file is always loaded. Reference files in `references/` are loaded on demand based on task type:
 - Simple fix (1–3 files): this file only
-- Multi-issue refactoring: this file + `modes/resolution-loop.md`
-- Codebase audit (100+ files): this file + `modes/audit.md` + `modes/resolution-loop.md`
-- Choosing parallel vs sequential: `modes/parallel-vs-sequential.md`
+- Multi-issue refactoring: this file + `references/resolution-loop.md`
+- Codebase audit (100+ files): this file + `references/audit.md` + `references/resolution-loop.md`
+- Choosing parallel vs sequential: `references/parallel-vs-sequential.md`
 
 **Script enforcement:** Each mode doc has a corresponding script that drives execution:
 - `scripts/verify.sh` — 8-point verification checklist (runs after every change)

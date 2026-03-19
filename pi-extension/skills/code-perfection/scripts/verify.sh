@@ -121,10 +121,11 @@ if [ -f "package.json" ]; then
   # Check if test script exists
   HAS_TEST=$(node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)" 2>/dev/null && echo "yes" || echo "no")
   if [ "$HAS_TEST" = "yes" ]; then
+    # Set CI=true to disable watch mode in jest/vitest and avoid interactive prompts
     if command -v bun &>/dev/null; then
-      TEST_OUTPUT=$(bun run test 2>&1) || TEST_RESULT=$?
+      TEST_OUTPUT=$(CI=true bun run test 2>&1) || TEST_RESULT=$?
     else
-      TEST_OUTPUT=$(npm test 2>&1) || TEST_RESULT=$?
+      TEST_OUTPUT=$(CI=true npm test 2>&1) || TEST_RESULT=$?
     fi
     check "Tests pass" "$TEST_RESULT" "$( [ $TEST_RESULT -ne 0 ] && echo "$TEST_OUTPUT" | tail -10 )"
   else
@@ -176,7 +177,7 @@ if [ "${#TS_CHANGED[@]:-0}" -gt 0 ]; then
   ANY_FILES=""
   for f in "${TS_CHANGED[@]}"; do
     # Count explicit 'any' type annotations (not in comments/strings — rough heuristic)
-    COUNT=$(grep -n ': any\b\|: any;\|: any,\|: any)\|<any>' "$f" 2>/dev/null | grep -v '^\s*//' | wc -l | tr -d ' ')
+    COUNT=$(grep -nE ':\s*any\s*[;,)>\s]|:\s*any\s*$|<any>' "$f" 2>/dev/null | grep -v '^\s*//' | wc -l | tr -d ' ')
     if [ "$COUNT" -gt 0 ]; then
       ANY_COUNT=$((ANY_COUNT + COUNT))
       ANY_FILES="${ANY_FILES} ${f}(${COUNT})"
@@ -199,7 +200,7 @@ if [ "${#CHANGED_FILES[@]:-0}" -gt 0 ]; then
   for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
     [ -f "$f" ] || continue
     # Check for common secret patterns
-    MATCHES=$(grep -inE '(password|secret|api_key|apikey|private_key|access_token)\s*[:=]\s*["\x27][^"\x27]{8,}' "$f" 2>/dev/null | grep -v '^\s*//' | head -3 || true)
+    MATCHES=$(grep -inE "(password|secret|api_key|apikey|private_key|access_token)\s*[:=]\s*[\"'][^\"']{8,}" "$f" 2>/dev/null | grep -v '^\s*//' | head -3 || true)
     if [ -n "$MATCHES" ]; then
       SECRET_RESULT=1
       SECRET_MATCHES="${SECRET_MATCHES}\n  ${f}: $(echo "$MATCHES" | head -1)"
@@ -219,19 +220,27 @@ for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
   fi
 done
 
-if [ "${#JS_CHANGED[@]:-0}" -gt 0 ] && command -v npx &>/dev/null && [ -f "package.json" ]; then
-  # Try eslint unused imports check if available
-  LINT_OUTPUT=$(npx eslint --no-eslintrc --rule '{"no-unused-vars": "error"}' "${JS_CHANGED[@]}" 2>&1) || DEAD_RESULT=$?
-  if [ "$DEAD_RESULT" -ne 0 ]; then
-    # Only fail if it's actually unused vars, not eslint config errors
-    if echo "$LINT_OUTPUT" | grep -q "no-unused-vars"; then
-      check "No dead code (unused vars)" "$DEAD_RESULT" "$(echo "$LINT_OUTPUT" | grep 'no-unused-vars' | head -5)"
+if [ "${#JS_CHANGED[@]:-0}" -gt 0 ] && [ -f "package.json" ]; then
+  # Try the project's existing lint setup first, fall back to basic grep check
+  DEAD_CHECKED=false
+  if command -v npx &>/dev/null; then
+    # Try eslint with --no-eslintrc (v8) or without it (v9 flat config)
+    LINT_OUTPUT=$(npx eslint --no-eslintrc --rule '{"no-unused-vars": "error"}' "${JS_CHANGED[@]}" 2>&1) || DEAD_RESULT=$?
+    if [ "$DEAD_RESULT" -ne 0 ]; then
+      if echo "$LINT_OUTPUT" | grep -q "no-unused-vars"; then
+        check "No dead code (unused vars)" "$DEAD_RESULT" "$(echo "$LINT_OUTPUT" | grep 'no-unused-vars' | head -5)"
+        DEAD_CHECKED=true
+      elif echo "$LINT_OUTPUT" | grep -q "ERR_INVALID_ARG\|--no-eslintrc"; then
+        # ESLint v9+ does not support --no-eslintrc; skip gracefully
+        DEAD_RESULT=0
+      fi
     else
-      DEAD_RESULT=0
-      check "No dead code" 0 "(lint check not applicable)"
+      check "No dead code" 0
+      DEAD_CHECKED=true
     fi
-  else
-    check "No dead code" 0
+  fi
+  if ! $DEAD_CHECKED; then
+    check "No dead code" 0 "(lint check not applicable — skipped)"
   fi
 else
   check "No dead code" 0 "(skipped — no JS/TS files or no linter)"

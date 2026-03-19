@@ -13,7 +13,7 @@ Use this skill when the user asks to refactor, optimize, clean up, or audit code
 |------|---------|
 | `codeperfect_verify` | 8-point verification checklist (compiles, tests, no any, no secrets, no dead code, no scope creep) |
 | `codeperfect_loop` | Resolution loop — issue ledger, lock, revert-on-failure, auto-commit, auto-defer |
-| `codeperfect_audit` | Domain-scoped audit state — triage, one-domain-at-a-time, boundary analysis |
+| `codeperfect_audit` | Domain-scoped audit state — triage, one-domain-at-a-time, boundary analysis, merge-findings |
 | `codeperfect_triage` | Structural recon — risk-tier classification without reading code |
 
 ## Commands

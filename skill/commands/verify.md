@@ -9,7 +9,8 @@ EXECUTE IMMEDIATELY.
 ## Execution
 
 1. Resolve `SKILL_DIR` — find the code-perfection skill directory:
-   - Probe: `$HOME/.claude/skills/code-perfection`, `$HOME/.codex/skills/code-perfection`, `$HOME/.agents/skills/code-perfection`
+   - Probe: `$HOME/.claude/skills/code-perfection`, `$HOME/.codex/skills/code-perfection`, `$HOME/.agents/skills/code-perfection`, `$HOME/.cursor/skills/code-perfection`, `$HOME/.kiro/skills/code-perfection`
+   - Use the first that contains `SKILL.md`
 
 2. Run the verification script:
    ```bash

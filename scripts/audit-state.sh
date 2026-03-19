@@ -14,6 +14,26 @@ STATE_DIR=".codeperfect"
 AUDIT_STATE="$STATE_DIR/audit-state.json"
 TRIAGE_FILE="$STATE_DIR/triage.json"
 
+# Atomic JSON write helper — used by inline Python to prevent corruption on crash.
+ATOMIC_WRITE_PY='
+import tempfile
+def atomic_json_write(filepath, data):
+    import json, os
+    dir_ = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp", prefix=".audit_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, filepath)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+'
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -38,6 +58,7 @@ cmd_init() {
   CP_TRIAGE="$TRIAGE_FILE" CP_TARGET="$target" CP_AUDIT_STATE="$AUDIT_STATE" \
   CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os
 with open(os.environ['CP_TRIAGE']) as f:
     triage = json.load(f)
@@ -65,8 +86,7 @@ for domain in triage.get('domains', []):
         'issues_deferred': 0
     }
 
-with open(os.environ['CP_AUDIT_STATE'], 'w') as f:
-    json.dump(state, f, indent=2)
+atomic_json_write(os.environ['CP_AUDIT_STATE'], state)
 print(f'Initialized audit state: {len(state[\"domains\"])} domains')
 "
   printf "${GREEN}Audit state${NC} initialized at %s\n" "$AUDIT_STATE"
@@ -150,6 +170,7 @@ cmd_start_domain() {
 
   CP_AUDIT_STATE="$AUDIT_STATE" CP_NAME="$name" CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 audit_state = os.environ['CP_AUDIT_STATE']
 domain_name = os.environ['CP_NAME']
@@ -173,8 +194,7 @@ if state['domains'][domain_name]['status'] == 'done':
 
 state['domains'][domain_name]['status'] = 'in_progress'
 state['last_updated'] = timestamp
-with open(audit_state, 'w') as f:
-    json.dump(state, f, indent=2)
+atomic_json_write(audit_state, state)
 print(f'Started domain: {domain_name}')
 "
   printf "${CYAN}Started${NC} domain: %s\n" "$name"
@@ -216,6 +236,7 @@ print(f'{total} {done} {deferred}')
   CP_AUDIT_STATE="$AUDIT_STATE" CP_NAME="$name" CP_TIMESTAMP="$timestamp" \
   CP_FOUND="$issues_found" CP_RESOLVED="$issues_resolved" CP_DEFERRED="$issues_deferred" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 audit_state = os.environ['CP_AUDIT_STATE']
 domain_name = os.environ['CP_NAME']
@@ -236,8 +257,7 @@ state['domains'][domain_name]['issues_deferred'] = int(os.environ['CP_DEFERRED']
 state['total_resolved'] = sum(d['issues_resolved'] for d in state['domains'].values())
 state['total_deferred'] = sum(d['issues_deferred'] for d in state['domains'].values())
 state['last_updated'] = os.environ['CP_TIMESTAMP']
-with open(audit_state, 'w') as f:
-    json.dump(state, f, indent=2)
+atomic_json_write(audit_state, state)
 "
   printf "${GREEN}Completed${NC} domain: %s (found=%d resolved=%d deferred=%d)\n" \
     "$name" "$issues_found" "$issues_resolved" "$issues_deferred"
@@ -257,6 +277,7 @@ cmd_find_boundaries() {
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   CP_AUDIT_STATE="$AUDIT_STATE" CP_TARGET="$target" CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, re
 
 audit_state = os.environ['CP_AUDIT_STATE']
@@ -312,8 +333,7 @@ for root, dirs, files in os.walk(target):
 
 state['boundaries'] = boundaries
 state['last_updated'] = timestamp
-with open(audit_state, 'w') as f:
-    json.dump(state, f, indent=2)
+atomic_json_write(audit_state, state)
 
 print(f'Found {len(boundaries)} boundary pairs:')
 for key, b in sorted(boundaries.items()):
@@ -331,6 +351,7 @@ cmd_start_boundary() {
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   CP_AUDIT_STATE="$AUDIT_STATE" CP_PAIR="$pair" CP_TIMESTAMP="$timestamp" \
   python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, sys
 audit_state = os.environ['CP_AUDIT_STATE']
 pair = os.environ['CP_PAIR']
@@ -341,8 +362,7 @@ if pair not in state.get('boundaries', {}):
     sys.exit(1)
 state['boundaries'][pair]['status'] = 'in_progress'
 state['last_updated'] = os.environ['CP_TIMESTAMP']
-with open(audit_state, 'w') as f:
-    json.dump(state, f, indent=2)
+atomic_json_write(audit_state, state)
 "
   printf "${CYAN}Started${NC} boundary audit: %s\n" "$pair"
 }
@@ -357,15 +377,21 @@ cmd_complete_boundary() {
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   CP_AUDIT_STATE="$AUDIT_STATE" CP_PAIR="$pair" CP_TIMESTAMP="$timestamp" \
   python3 -c "
-import json, os
+${ATOMIC_WRITE_PY}
+import json, os, sys
 audit_state = os.environ['CP_AUDIT_STATE']
 pair = os.environ['CP_PAIR']
 with open(audit_state) as f:
     state = json.load(f)
+if pair not in state.get('boundaries', {}):
+    print(f'ERROR: Boundary {pair} not found')
+    sys.exit(1)
+if state['boundaries'][pair]['status'] != 'in_progress':
+    print(f'ERROR: Boundary {pair} has status \"{state[\"boundaries\"][pair][\"status\"]}\" — must be in_progress to complete')
+    sys.exit(1)
 state['boundaries'][pair]['status'] = 'done'
 state['last_updated'] = os.environ['CP_TIMESTAMP']
-with open(audit_state, 'w') as f:
-    json.dump(state, f, indent=2)
+atomic_json_write(audit_state, state)
 "
   printf "${GREEN}Completed${NC} boundary: %s\n" "$pair"
 }
@@ -447,6 +473,7 @@ cmd_merge_findings() {
   printf "${CYAN}Merging${NC} parallel agent findings...\n"
 
   CP_DIR="$findings_dir" CP_OUT="$merged_file" python3 -c "
+${ATOMIC_WRITE_PY}
 import json, os, glob
 
 findings_dir = os.environ['CP_DIR']
@@ -482,8 +509,7 @@ merged = {
     'issues': all_issues
 }
 
-with open(output_file, 'w') as f:
-    json.dump(merged, f, indent=2)
+atomic_json_write(output_file, merged)
 
 print(f'Merged {len(all_issues)} unique issues from {len(finding_files)} files')
 print(f'Written to {output_file}')

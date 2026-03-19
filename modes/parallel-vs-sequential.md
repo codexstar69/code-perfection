@@ -50,7 +50,7 @@ Phase 4: Sequential resolution loop
 These are enforced by the scripts, not by agent discipline:
 
 - **Read-only agents may run in parallel.** They read files and produce reports. They never modify code. The `scripts/audit-state.sh` script rejects `start-domain` calls from two agents on the same domain.
-- **Writing agents must be sequential.** One writer at a time. `scripts/resolution-loop.sh` uses a lockfile (`.codeperfect/fix.lock`) — a second instance fails immediately with "lock held."
+- **Writing agents must be sequential.** One writer at a time. `scripts/resolution-loop.sh` uses an atomic lock directory (`.codeperfect/fix.lock/`, created via `mkdir` for race-condition safety) — a second `start` call fails immediately if an issue is already in_progress.
 - **Never merge parallel findings blindly.** After parallel scanning, deduplicate by file + line. If two agents report different issues on the same line, a sequential tiebreaker pass reads the code and decides.
 - **Parallel agents must not share state.** Each agent writes to its own output file (`<agent-id>-findings.json`). Merging happens after all agents complete via `scripts/audit-state.sh merge-findings`.
 - **If a parallel agent fails, the work is not lost.** The successful agent's results stand. Re-run only the failed agent's scope.

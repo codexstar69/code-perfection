@@ -24,11 +24,20 @@ mkdir -p "$STATE_DIR"
 
 printf "${CYAN}Triage${NC}: scanning %s...\n" "$TARGET"
 
+if [ ! -d "$TARGET" ]; then
+  printf "${RED}ERROR${NC}: Target directory does not exist: %s\n" "$TARGET" >&2
+  exit 1
+fi
+
 CP_TARGET="$TARGET" CP_TRIAGE_FILE="$TRIAGE_FILE" python3 -c "
-import os, json, re
+import os, json, re, sys
 
 target = os.environ['CP_TARGET']
 triage_file = os.environ['CP_TRIAGE_FILE']
+
+if not os.path.isdir(target):
+    print(f'ERROR: Target directory does not exist: {target}', file=sys.stderr)
+    sys.exit(1)
 
 # Source file extensions
 SOURCE_EXTS = {'.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift', '.c', '.cpp', '.h', '.hpp', '.cs', '.php', '.vue', '.svelte'}

@@ -29,6 +29,8 @@ Use this skill when the user asks to:
 
 ## Architecture
 
+All paths below are relative to `$SKILL_DIR` (the directory containing this file):
+
 ```
 SKILL.md                    — this file (always loaded)
 references/
@@ -116,16 +118,16 @@ The scripts enforce rules mechanically — agents cannot bypass them:
 
 ## Requirements
 
-- `python3` (for state management scripts)
-- `git` (for revert-on-failure and auto-commit)
-- A build system (optional — verify.sh auto-detects and skips if missing)
+- `python3` (required by `resolution-loop.sh`, `audit-state.sh`, and `triage.sh` for state management)
+- `git` (required by `resolution-loop.sh` for revert-on-failure and auto-commit; `verify.sh` works without git but skips git-dependent checks)
+- A build system (optional — `verify.sh` auto-detects and skips if missing)
 
 ## Error Handling
 
 | Failure | Behavior |
 |---------|----------|
-| `python3` not found | Scripts exit with clear error message |
-| `git` not found | Scripts exit with clear error message |
+| `python3` not found | `resolution-loop.sh`, `audit-state.sh`, `triage.sh` exit with clear error message; `verify.sh` is unaffected (pure bash) |
+| `git` not found | `resolution-loop.sh` exits with clear error message; `verify.sh` skips git-dependent checks gracefully |
 | No build system detected | `verify.sh` warns but passes (skips compile/test checks) |
 | Lock held by another process | `resolution-loop.sh start` fails immediately |
 | 3 failed fix attempts | Issue auto-deferred, loop continues with next issue |

@@ -20,6 +20,11 @@ FAIL=0
 WARN=0
 FAILURES=""
 
+# Helper: safely get array length (works under set -u on all bash versions)
+arrlen() {
+  echo "${#@}"
+}
+
 check() {
   local name="$1"
   local result="$2"
@@ -52,12 +57,15 @@ elif $HAS_GIT && git rev-parse --git-dir &>/dev/null; then
   while IFS= read -r line; do
     [ -n "$line" ] && CHANGED_FILES+=("$line")
   done < <(git diff --name-only HEAD 2>/dev/null || true)
-  if [ "${#CHANGED_FILES[@]:-0}" -eq 0 ]; then
+  CHANGED_COUNT=$(arrlen "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}")
+  if [ "$CHANGED_COUNT" -eq 0 ]; then
     while IFS= read -r line; do
       [ -n "$line" ] && CHANGED_FILES+=("$line")
     done < <(git diff --cached --name-only 2>/dev/null || true)
   fi
 fi
+
+CHANGED_COUNT=$(arrlen "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}")
 
 printf "\n=== Code Perfection Verification ===\n\n"
 
@@ -171,12 +179,14 @@ for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
   fi
 done
 
-if [ "${#TS_CHANGED[@]:-0}" -gt 0 ]; then
+TS_COUNT=$(arrlen "${TS_CHANGED[@]+"${TS_CHANGED[@]}"}")
+if [ "$TS_COUNT" -gt 0 ]; then
   ANY_COUNT=0
   ANY_FILES=""
   for f in "${TS_CHANGED[@]}"; do
     # Count explicit 'any' type annotations (not in comments/strings — rough heuristic)
-    COUNT=$(grep -n ': any\b\|: any;\|: any,\|: any)\|<any>' "$f" 2>/dev/null | grep -v '^\s*//' | wc -l | tr -d ' ')
+    # Disable pipefail locally so grep returning 1 (no match) doesn't kill the pipeline
+    COUNT=$(set +o pipefail; grep -n ': any\b\|: any;\|: any,\|: any)\|<any>' "$f" 2>/dev/null | grep -v '^\s*//' | wc -l | tr -d ' ')
     if [ "$COUNT" -gt 0 ]; then
       ANY_COUNT=$((ANY_COUNT + COUNT))
       ANY_FILES="${ANY_FILES} ${f}(${COUNT})"
@@ -194,12 +204,13 @@ fi
 
 # 4. NO SECRETS EXPOSED — check for common secret patterns in changed files
 SECRET_RESULT=0
-if [ "${#CHANGED_FILES[@]:-0}" -gt 0 ]; then
+if [ "$CHANGED_COUNT" -gt 0 ]; then
   SECRET_MATCHES=""
   for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
     [ -f "$f" ] || continue
     # Check for common secret patterns
-    MATCHES=$(grep -inE '(password|secret|api_key|apikey|private_key|access_token)\s*[:=]\s*["\x27][^"\x27]{8,}' "$f" 2>/dev/null | grep -v '^\s*//' | head -3 || true)
+    # Disable pipefail locally so grep returning 1 (no match) doesn't kill the pipeline
+    MATCHES=$(set +o pipefail; grep -inE '(password|secret|api_key|apikey|private_key|access_token)\s*[:=]\s*["\x27][^"\x27]{8,}' "$f" 2>/dev/null | grep -v '^\s*//' | head -3 || true)
     if [ -n "$MATCHES" ]; then
       SECRET_RESULT=1
       SECRET_MATCHES="${SECRET_MATCHES}\n  ${f}: $(echo "$MATCHES" | head -1)"
@@ -219,7 +230,8 @@ for f in "${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}"; do
   fi
 done
 
-if [ "${#JS_CHANGED[@]:-0}" -gt 0 ] && command -v npx &>/dev/null && [ -f "package.json" ]; then
+JS_COUNT=$(arrlen "${JS_CHANGED[@]+"${JS_CHANGED[@]}"}")
+if [ "$JS_COUNT" -gt 0 ] && command -v npx &>/dev/null && [ -f "package.json" ]; then
   # Try eslint unused imports check if available
   LINT_OUTPUT=$(npx eslint --no-eslintrc --rule '{"no-unused-vars": "error"}' "${JS_CHANGED[@]}" 2>&1) || DEAD_RESULT=$?
   if [ "$DEAD_RESULT" -ne 0 ]; then
@@ -238,10 +250,10 @@ else
 fi
 
 # 6. SCOPE CHECK — fail if too many files changed (hard limit: 20)
-if [ "${#CHANGED_FILES[@]:-0}" -gt 20 ]; then
-  check "No scope creep" 1 "${#CHANGED_FILES[@]} files changed — exceeds hard limit of 20"
-elif [ "${#CHANGED_FILES[@]:-0}" -gt 10 ]; then
-  warn "Scope creep" "${#CHANGED_FILES[@]} files changed — review for scope creep"
+if [ "$CHANGED_COUNT" -gt 20 ]; then
+  check "No scope creep" 1 "${CHANGED_COUNT} files changed — exceeds hard limit of 20"
+elif [ "$CHANGED_COUNT" -gt 10 ]; then
+  warn "Scope creep" "${CHANGED_COUNT} files changed — review for scope creep"
 else
   check "No scope creep" 0
 fi

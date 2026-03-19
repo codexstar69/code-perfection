@@ -96,7 +96,7 @@ Only the script moves status. The agent does not edit `.codeperfect/issues.json`
 
 When `scripts/verify.sh` fails after a fix attempt:
 
-1. The script reverts immediately via `git checkout -- .` on tracked files. Untracked files are preserved (never runs `git clean`) to avoid destroying user work.
+1. The script validates the issue status before reverting (prevents accidental revert if called on a `done` issue). Then it reverts tracked files via `git checkout -- ':!.codeperfect'` (excludes the state directory). Untracked files are preserved (never runs `git clean`) to avoid destroying user work.
 2. The script records: what was tried, what broke, the verify output.
 3. The agent reads the failure record and chooses a **fundamentally different approach** — not a tweak.
 4. If the same issue has failed twice, the agent MUST re-read the entire module before attempt 3.

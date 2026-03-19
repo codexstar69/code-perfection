@@ -17,7 +17,8 @@ Extract from $ARGUMENTS:
 ## Execution
 
 1. Resolve `SKILL_DIR` — find the code-perfection skill directory:
-   - Probe: `$HOME/.claude/skills/code-perfection`, `$HOME/.codex/skills/code-perfection`, `$HOME/.agents/skills/code-perfection`
+   - Probe: `$HOME/.claude/skills/code-perfection`, `$HOME/.codex/skills/code-perfection`, `$HOME/.agents/skills/code-perfection`, `$HOME/.cursor/skills/code-perfection`, `$HOME/.kiro/skills/code-perfection`
+   - Use the first that contains `SKILL.md`
 
 2. Read all three reference files:
    ```
@@ -33,7 +34,9 @@ Extract from $ARGUMENTS:
    ```
    Read `.codeperfect/triage.json` to see the domain map.
 
-4. Process domains in tier order (Tier 1):
+4. If `--tier <level>` was specified, filter the domain map to only include domains at that tier and above (e.g., `--tier high` includes CRITICAL and HIGH, skips MEDIUM and LOW).
+
+5. Process domains in tier order (Tier 1):
    ```bash
    # Get next domain
    "$SKILL_DIR/scripts/audit-state.sh" next-domain
@@ -47,7 +50,8 @@ Extract from $ARGUMENTS:
    # Read ALL files in this domain, identify issues
    # For each issue: resolution-loop.sh add ...
 
-   # Run the resolution loop (see /code-perfection command for the loop protocol)
+   # If --scan-only: skip the resolution loop, just report issues
+   # Otherwise: run the resolution loop (see /code-perfection command for the loop protocol)
    # ...until resolution-loop.sh status returns exit code 0
 
    # Complete the domain
@@ -56,7 +60,7 @@ Extract from $ARGUMENTS:
    # Repeat for next domain
    ```
 
-5. After all domains: run boundary audit (Tier 2):
+6. After all domains: run boundary audit (Tier 2):
    ```bash
    "$SKILL_DIR/scripts/audit-state.sh" find-boundaries <target>
    # For each boundary pair:
@@ -65,7 +69,7 @@ Extract from $ARGUMENTS:
    "$SKILL_DIR/scripts/audit-state.sh" complete-boundary <pair>
    ```
 
-6. Generate the final report (Tier 3):
+7. Generate the final report (Tier 3):
    ```bash
    "$SKILL_DIR/scripts/audit-state.sh" report
    ```

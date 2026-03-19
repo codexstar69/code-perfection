@@ -1,6 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
@@ -9,16 +9,25 @@ export default function (pi: ExtensionAPI) {
   const scriptsDir = join(SKILL_DIR, "scripts");
 
   function runScript(script: string, args: string[] = [], cwd?: string): { exitCode: number; output: string } {
-    const cmd = `"${join(scriptsDir, script)}" ${args.map((a) => `"${a}"`).join(" ")}`;
+    const scriptPath = join(scriptsDir, script);
+    if (!existsSync(scriptPath)) {
+      return { exitCode: 127, output: `Script not found: ${scriptPath}` };
+    }
     try {
-      const output = execSync(cmd, {
+      const output = execFileSync(scriptPath, args, {
         cwd: cwd || process.cwd(),
         encoding: "utf-8",
         timeout: 120000,
+        maxBuffer: 10 * 1024 * 1024,
       });
       return { exitCode: 0, output };
     } catch (err: any) {
-      return { exitCode: err.status || 1, output: err.stdout || err.message };
+      const stdout = typeof err.stdout === "string" ? err.stdout : "";
+      const stderr = typeof err.stderr === "string" ? err.stderr : "";
+      const combined = (stdout + stderr).trim();
+      const exitCode = typeof err.status === "number" ? err.status : 1;
+      const signal = err.signal ? ` (signal: ${err.signal})` : "";
+      return { exitCode, output: combined || `${err.message}${signal}` };
     }
   }
 
@@ -52,9 +61,19 @@ export default function (pi: ExtensionAPI) {
     description:
       "Manage the resolution loop issue ledger. Commands: init, scan, add, start, resolve, fail, status, report. The loop enforces fix-verify-decide cycles with auto-revert and auto-defer.",
     parameters: Type.Object({
-      command: Type.String({
-        description: 'One of: init, scan, add, start, resolve, fail, status, report',
-      }),
+      command: Type.Union(
+        [
+          Type.Literal("init"),
+          Type.Literal("scan"),
+          Type.Literal("add"),
+          Type.Literal("start"),
+          Type.Literal("resolve"),
+          Type.Literal("fail"),
+          Type.Literal("status"),
+          Type.Literal("report"),
+        ],
+        { description: "The resolution loop command to run" }
+      ),
       args: Type.Optional(
         Type.Array(Type.String(), {
           description: "Arguments for the command (e.g., file, line, severity, description for add)",
@@ -77,10 +96,21 @@ export default function (pi: ExtensionAPI) {
     description:
       "Manage large codebase audit state. Commands: init, status, next-domain, start-domain, complete-domain, find-boundaries, start-boundary, complete-boundary, report. Enforces one-domain-at-a-time and resume-safe state.",
     parameters: Type.Object({
-      command: Type.String({
-        description:
-          'One of: init, status, next-domain, start-domain, complete-domain, find-boundaries, start-boundary, complete-boundary, report',
-      }),
+      command: Type.Union(
+        [
+          Type.Literal("init"),
+          Type.Literal("status"),
+          Type.Literal("next-domain"),
+          Type.Literal("start-domain"),
+          Type.Literal("complete-domain"),
+          Type.Literal("find-boundaries"),
+          Type.Literal("start-boundary"),
+          Type.Literal("complete-boundary"),
+          Type.Literal("merge-findings"),
+          Type.Literal("report"),
+        ],
+        { description: "The audit state command to run" }
+      ),
       args: Type.Optional(
         Type.Array(Type.String(), {
           description: "Arguments for the command (e.g., domain name, target path)",
@@ -119,13 +149,22 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  function readRef(name: string): string {
+    const refPath = join(SKILL_DIR, "references", name);
+    try {
+      return readFileSync(refPath, "utf-8");
+    } catch {
+      return `[ERROR: Reference file not found: ${refPath}]`;
+    }
+  }
+
   // --- Commands ---
   pi.registerCommand("code-perfection", {
     description: "Run the Code Perfection resolution loop on a target directory",
     async handler(args, ctx) {
       const target = args.trim() || ".";
-      const agentsMd = readFileSync(join(SKILL_DIR, "references", "agents.md"), "utf-8");
-      const loopMd = readFileSync(join(SKILL_DIR, "references", "resolution-loop.md"), "utf-8");
+      const agentsMd = readRef("agents.md");
+      const loopMd = readRef("resolution-loop.md");
 
       await ctx.waitForIdle();
       pi.sendMessage(
@@ -153,9 +192,9 @@ export default function (pi: ExtensionAPI) {
     description: "Full tiered codebase audit with domain-scoped scanning",
     async handler(args, ctx) {
       const target = args.trim() || ".";
-      const agentsMd = readFileSync(join(SKILL_DIR, "references", "agents.md"), "utf-8");
-      const auditMd = readFileSync(join(SKILL_DIR, "references", "audit.md"), "utf-8");
-      const loopMd = readFileSync(join(SKILL_DIR, "references", "resolution-loop.md"), "utf-8");
+      const agentsMd = readRef("agents.md");
+      const auditMd = readRef("audit.md");
+      const loopMd = readRef("resolution-loop.md");
 
       await ctx.waitForIdle();
       pi.sendMessage(
@@ -181,9 +220,15 @@ export default function (pi: ExtensionAPI) {
     description: "Run the 8-point verification checklist",
     async handler(args, ctx) {
       await ctx.waitForIdle();
-      pi.sendMessage(
-        `Run \`codeperfect_verify\` now${args.trim() ? ` with changed_files: ${args.trim()}` : ""}.`
-      );
+      const files = args.trim();
+      if (files) {
+        const fileList = files.split(/\s+/).map((f) => `"${f}"`).join(", ");
+        pi.sendMessage(
+          `Run \`codeperfect_verify\` now with changed_files: [${fileList}].`
+        );
+      } else {
+        pi.sendMessage(`Run \`codeperfect_verify\` now (auto-detect changed files from git).`);
+      }
     },
   });
 }

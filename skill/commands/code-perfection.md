@@ -17,14 +17,14 @@ Extract from $ARGUMENTS:
 ## Execution
 
 1. Resolve `SKILL_DIR` — find the code-perfection skill directory:
-   - Probe: `$HOME/.claude/skills/code-perfection`, `$HOME/.codex/skills/code-perfection`, `$HOME/.agents/skills/code-perfection`
+   - Probe: `$HOME/.claude/skills/code-perfection`, `$HOME/.codex/skills/code-perfection`, `$HOME/.agents/skills/code-perfection`, `$HOME/.cursor/skills/code-perfection`, `$HOME/.kiro/skills/code-perfection`
    - Use the first that contains `SKILL.md`
 
 2. If `--verify-only`:
    ```bash
-   "$SKILL_DIR/scripts/verify.sh"
+   "$SKILL_DIR/scripts/verify.sh" <remaining-args-after-stripping-flags>
    ```
-   Stop after showing results.
+   Pass any remaining arguments (e.g., `--changed-files file1.ts file2.ts`) to verify.sh. Stop after showing results.
 
 3. Read the core code standards:
    ```
