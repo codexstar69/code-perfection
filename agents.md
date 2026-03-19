@@ -99,6 +99,111 @@ assert(user, `user not found: ${id}`);
 - Do not create wrapper functions that just pass values through.
 - No barrel exports unless the project already uses them.
 
+### naming and conventions
+
+- Use descriptive names that reveal intent. Avoid abbreviations except widely understood ones (`id`, `url`, `config`).
+- Match existing naming patterns in the codebase — consistency beats personal preference.
+- Boolean variables and functions should read as questions: `isValid`, `hasPermission`, `canRetry`.
+- Avoid flag arguments that toggle behavior. Prefer separate functions or explicit options.
+
+```ts
+// bad — boolean flag hides intent
+function getUser(id: string, includeDeleted: boolean) {}
+
+// good — explicit, self-documenting
+function getUser(id: string) {}
+function getUserIncludingDeleted(id: string) {}
+```
+
+### dead code and duplication
+
+- Remove dead code immediately. Do not comment it out "for reference" — git history preserves it.
+- Remove unused imports, variables, functions, and types.
+- Tolerate small amounts of duplication. Two or three similar lines are better than a premature abstraction.
+- Only extract shared code when duplication is exact and appears three or more times.
+
+### complexity management
+
+- Reduce cyclomatic and cognitive complexity. Flatten deeply nested logic.
+- Prefer guard clauses and early returns over deeply nested conditionals.
+- If a function does more than one thing, consider splitting it — but only if both pieces are independently meaningful.
+- Avoid long parameter lists, long functions, and long files as signals of excessive complexity.
+
+```ts
+// bad — deeply nested
+function process(input: Input) {
+  if (input.isValid) {
+    if (input.hasData) {
+      if (input.data.length > 0) {
+        return transform(input.data);
+      }
+    }
+  }
+  return null;
+}
+
+// good — guard clauses
+function process(input: Input) {
+  if (!input.isValid) return null;
+  if (!input.hasData) return null;
+  if (input.data.length === 0) return null;
+  return transform(input.data);
+}
+```
+
+### concurrency and async
+
+- Avoid shared mutable state between concurrent operations.
+- Prefer `Promise.all` for independent async operations over sequential `await`.
+- Always handle promise rejections. Never leave a promise floating without a catch path.
+- Watch for race conditions when multiple async operations modify the same resource.
+
+```ts
+// bad — sequential when independent
+const users = await fetchUsers();
+const orders = await fetchOrders();
+
+// good — parallel when independent
+const [users, orders] = await Promise.all([fetchUsers(), fetchOrders()]);
+```
+
+### security
+
+- Never interpolate user input directly into SQL, shell commands, or HTML.
+- Validate and sanitize all external input at system boundaries.
+- Do not log sensitive data — passwords, tokens, API keys, or PII.
+- Do not hardcode secrets or credentials. Use environment variables or a secrets manager.
+
+### logging and observability
+
+- Log at appropriate levels: errors for failures, warnings for degraded state, info for key events, debug for development.
+- Include enough context to diagnose issues — request IDs, user IDs, operation names.
+- Do not log excessively in hot paths. Logging has a cost.
+- Prefer structured logging (key-value pairs) over string concatenation.
+
+### patterns and anti-patterns
+
+- Avoid code smells: long methods, god objects, feature envy, shotgun surgery.
+- Prefer composition over inheritance.
+- Do not use singletons unless the runtime genuinely requires a single instance.
+- Avoid magic numbers and magic strings. Extract named constants when the value is not self-evident.
+
+```ts
+// bad — magic number
+if (retries > 3) throw new Error('too many retries');
+
+// good — named constant
+const MAX_RETRIES = 3;
+if (retries > MAX_RETRIES) throw new Error('too many retries');
+```
+
+### loops and iteration
+
+- Prefer `for...of` for iterating arrays when you need the value.
+- Prefer `.map`, `.filter`, `.some`, `.every` for declarative transforms — but not when they hurt readability.
+- Avoid `for...in` for arrays. It iterates over keys, not values.
+- Break out of loops early when the result is already determined.
+
 ### react-specific rules
 
 - Do not add `useCallback`, `useMemo`, or `React.memo` unless there is a measured performance problem.
