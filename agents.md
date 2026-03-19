@@ -258,6 +258,21 @@ const MAX_RETRIES = 3;
 if (retries > MAX_RETRIES) throw new Error('too many retries');
 ```
 
+### variables and immutability
+
+- Default to `const`. Only use `let` when reassignment is genuinely needed.
+- Never use `var`.
+- Prefer immutable data. Clone-and-modify over mutate-in-place, unless performance is measured and critical.
+- Do not reassign function parameters. Create a new variable instead.
+
+### performance
+
+- Do not optimize without evidence. Premature optimization creates complexity without measurable benefit.
+- Profile before optimizing. Use benchmarks, flame graphs, or production metrics to identify real bottlenecks.
+- Avoid allocations in hot loops — reuse buffers, pre-allocate arrays, avoid string concatenation.
+- Prefer algorithmic improvements (O(n²) → O(n log n)) over micro-optimizations.
+- Cache expensive computations only when the cost is measured and the cache invalidation strategy is clear.
+
 ### loops and iteration
 
 - Prefer `for...of` for iterating arrays when you need the value.
