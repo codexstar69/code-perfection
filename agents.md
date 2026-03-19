@@ -2,6 +2,14 @@
 
 Instructions for autonomous code refactoring and optimization. Every change must preserve existing behavior, introduce zero bugs, and lose zero functionality.
 
+**System enforcement:** This document defines the rules. The `scripts/` directory enforces them mechanically. Agents do not choose whether to follow the loop — the scripts drive execution.
+
+**Loading strategy:** This file is always loaded. Mode files in `modes/` are loaded on demand based on task type:
+- Simple fix (1–3 files): this file only
+- Multi-issue refactoring: this file + `modes/resolution-loop.md`
+- Codebase audit (100+ files): this file + `modes/audit.md` + `modes/resolution-loop.md`
+- Choosing parallel vs sequential: `modes/parallel-vs-sequential.md`
+
 ## core instruction
 
 Do only the work required for the task.
@@ -332,7 +340,7 @@ if (retries > MAX_RETRIES) throw new Error('too many retries');
 - Do not leave TODO comments.
 - Do not add tests unless asked.
 - Do not add broad typing cleanup unless asked.
-- Verify the code compiles.
+- Verify the code compiles — run `scripts/verify.sh` (see verification checklist).
 - If an import, API, or type is uncertain, check it before using it.
 
 ## refactoring methodology
@@ -371,7 +379,7 @@ if (retries > MAX_RETRIES) throw new Error('too many retries');
 
 ## verification checklist
 
-Run through this checklist after every change. Do not skip steps.
+Run `scripts/verify.sh` after every change. The script enforces these checks mechanically:
 
 1. **Compiles** — the code builds without errors or new warnings.
 2. **Tests pass** — all existing tests pass without modification.
@@ -382,254 +390,4 @@ Run through this checklist after every change. Do not skip steps.
 7. **Naming consistent** — any new names match the conventions already present in the file.
 8. **No secrets exposed** — no credentials, keys, or tokens in the diff.
 
----
-
-## resolution loop
-
-Every refactoring task runs inside a resolution loop. The loop does not exit until all issues are resolved or explicitly deferred. No partial work. No "good enough." Fix it or explain why it cannot be fixed.
-
-### loop protocol
-
-```
-ITERATION = 0
-
-1. SCAN    — identify all issues in scope (see "large codebase audit" below)
-2. PLAN    — rank issues by severity, group by file/module, estimate blast radius
-3. FIX     — apply ONE atomic change (single concern, single commit)
-4. VERIFY  — run verification checklist (above) + any project-specific checks
-5. DECIDE  —
-   IF verify passes AND issue is resolved:
-       mark issue DONE, commit, go to step 6
-   IF verify fails (tests break, types error, behavior changes):
-       revert the change immediately
-       record what went wrong and why
-       try a different approach (max 3 attempts per issue)
-       if 3 attempts fail: mark issue DEFERRED with reason, go to step 6
-   IF verify passes BUT introduced a new issue:
-       add the new issue to the queue
-       commit the fix, go to step 6
-6. PROGRESS CHECK —
-   remaining = issues where status != DONE and status != DEFERRED
-   IF remaining == 0: EXIT loop — all issues resolved
-   IF remaining > 0: ITERATION++, go to step 3
-   NEVER ask "should I continue?" — if issues remain, continue.
-```
-
-### issue tracking during the loop
-
-Maintain a live issue ledger. Every issue has exactly one status at any time:
-
-| Status | Meaning |
-|--------|---------|
-| `OPEN` | Identified, not yet attempted |
-| `IN_PROGRESS` | Currently being worked on |
-| `DONE` | Fixed and verified |
-| `DEFERRED` | Cannot fix safely — requires human decision or broader context |
-
-Rules:
-- New issues discovered during fixing get status `OPEN` and enter the queue.
-- An issue moves to `DEFERRED` only after 3 failed fix attempts with documented reasons.
-- The loop exits when zero issues have status `OPEN` or `IN_PROGRESS`.
-- After exit, report the final ledger: how many DONE, how many DEFERRED and why.
-
-### revert discipline
-
-When a fix fails verification:
-1. Revert immediately. Do not try to patch the patch.
-2. Record: what was tried, what broke, why.
-3. Use the failure information to choose a fundamentally different approach — not a tweak of the same idea.
-4. If the same file has been reverted twice, step back and re-read the entire module before the third attempt.
-
-### loop safety guardrails
-
-- **Max 3 attempts per issue.** After 3 reversions on the same issue, mark it `DEFERRED`. Do not grind.
-- **Max iterations.** For bounded runs, set a hard cap. Default: `max(10, issue_count * 3)`.
-- **No cascading rewrites.** If fixing issue A requires rewriting module B which breaks module C — stop. Mark A as `DEFERRED` with reason "cascading scope." Fix A requires a separate, dedicated task.
-- **Checkpoint after every 5 resolved issues.** Run the full test suite, not just the files you touched. Catch drift early.
-
----
-
-## large codebase audit strategy
-
-Auditing a large codebase (100+ files) requires a systematic approach to avoid losing context, missing issues, or wasting effort re-reading code. The strategy is domain-first, tiered, and state-driven.
-
-### why naive approaches fail at scale
-
-- **Flat file-by-file scanning** loses domain context. Reading `auth/login.ts` then `billing/invoice.ts` in the same pass means you understand neither domain deeply.
-- **Reading everything at once** overflows working memory. By file 40 you have forgotten file 5.
-- **Random sampling** misses the most dangerous bugs — those at domain boundaries where assumptions change between services.
-
-### tier 0: rapid structural recon (no code reading)
-
-Before reading any code, map the codebase structure:
-
-1. **Discover domains** — list top-level directories (2 levels deep max). Each directory cluster is a "domain."
-2. **Count files per domain** — know the size of each area.
-3. **Classify domains by risk tier:**
-
-| Tier | Domains | Why |
-|------|---------|-----|
-| CRITICAL | auth, payments, security, API gateways, middleware | Direct attack surface, data integrity |
-| HIGH | core business logic, database models, state management | Behavioral correctness, data flow |
-| MEDIUM | utilities, helpers, formatting, UI components | Lower blast radius |
-| LOW | config, scripts, migrations, static assets | Rarely contain behavioral bugs |
-
-4. **Write the domain map.** This is your audit roadmap. Persist it so subsequent iterations do not re-scan.
-
-### tier 1: domain-scoped deep audits
-
-Process ONE domain at a time. Run the full audit pipeline within each domain before moving to the next:
-
-```
-For each domain (CRITICAL first → HIGH → MEDIUM → LOW):
-  1. Read ALL files in this domain — build a complete mental model
-  2. Identify issues: complexity, dead code, type gaps, bugs, duplication
-  3. Record every issue in the ledger with file, line, severity, description
-  4. Enter the resolution loop for this domain's issues
-  5. Mark domain as DONE in the audit state
-
-  Persist results per domain:
-    audit/<domain-name>/issues.md
-    audit/<domain-name>/status.json   (DONE / IN_PROGRESS / PENDING)
-```
-
-**Why one domain at a time:** The agent maintains full context for the entire domain — middleware, models, routes, utils — in one coherent pass. Issues that span multiple files within the domain are visible. The Skeptic/Referee pattern (challenge your own findings) works because you have full context to both find and verify.
-
-**If a domain exceeds working memory capacity:**
-- Chunk within the domain boundary. Split by subdirectory or logical grouping.
-- Never chunk across domains — that destroys coherence.
-- Process chunks sequentially within the domain. After all chunks, do a cross-chunk consistency check.
-
-### tier 2: cross-domain boundary audit
-
-After all individual domains are audited, run a focused pass on service boundaries — where the most dangerous bugs hide:
-
-1. **Identify boundary files** — files that import from other domains.
-2. **Build boundary pairs** — group by the two domains they connect:
-   ```
-   auth ↔ api-gateway:  [gateway/auth-middleware.ts, auth/token-service.ts]
-   billing ↔ orders:    [orders/checkout.ts, billing/charge.ts]
-   ```
-3. **For each boundary pair**, read files from BOTH domains simultaneously and check for:
-   - **Trust boundary violations** — does domain A trust unvalidated data from domain B?
-   - **Contract mismatches** — does the caller assume a return type the callee doesn't guarantee?
-   - **Race conditions** across domain boundaries.
-   - **Auth/permission gaps** — is a function reachable from both protected and unprotected routes?
-   - **Partial failure states** — multi-step cross-domain operations where step 2 fails but step 1's side effects aren't rolled back.
-4. Record boundary issues in the ledger and resolve them through the same loop.
-
-### tier 3: merge, deduplicate, report
-
-After all domains and boundaries are audited:
-1. Merge all domain issue ledgers.
-2. Deduplicate by file + line + description.
-3. Produce the final report: issues resolved, issues deferred, coverage achieved.
-
-### audit state management
-
-Persist audit progress so interruptions do not lose work:
-
-```json
-{
-  "domains": {
-    "auth": { "status": "done", "issues_found": 12, "issues_resolved": 11, "issues_deferred": 1 },
-    "billing": { "status": "in_progress", "issues_found": 5, "issues_resolved": 2 },
-    "orders": { "status": "pending" }
-  },
-  "boundaries": {
-    "auth-billing": { "status": "pending" }
-  },
-  "total_resolved": 13,
-  "total_deferred": 1,
-  "last_updated": "2026-03-19T10:00:00Z"
-}
-```
-
-**Resume rule:** On restart, read the state file. Skip domains marked `done`. Resume from the first `in_progress` or `pending` domain. Never re-audit `done` domains unless the code has changed since the audit.
-
----
-
-## parallel vs sequential: decision framework
-
-Not every audit task benefits from parallelism. Use the wrong mode and you waste effort, create conflicts, or miss cross-file bugs. Use this decision framework.
-
-### when to audit sequentially
-
-Sequential is the default. Use it when:
-
-- **Files are interdependent.** If file A's correctness depends on understanding file B (shared types, call chains, middleware stacks), they must be audited in the same pass.
-- **The domain is small.** Under 40 files, the overhead of splitting and merging exceeds the time saved.
-- **Cross-file bugs are likely.** Contract mismatches, error propagation gaps, and state management bugs require reading multiple files with full context. Parallel agents miss these.
-- **You are fixing, not just scanning.** Fixes modify files. Two parallel agents modifying files in the same directory will conflict. Fixing is always sequential — one writer at a time.
-- **The boundary audit phase.** Boundary pairs must read files from both domains simultaneously. This is inherently sequential per pair.
-
-### when to audit in parallel
-
-Parallel scanning is safe when the work units are independent and read-only:
-
-- **Multiple independent domains.** Domain `auth` and domain `billing` have no shared files. Two agents can scan them simultaneously, each maintaining full context of their own domain.
-- **Read-only triage passes.** A quick parallel sweep with two "lenses" (security lens + logic lens) over the same files can surface hints faster. But the results are not final — they feed into a sequential deep scan.
-- **Skeptic/challenger on independent finding sets.** If findings fall cleanly into separate directories, two Skeptics can challenge their own subsets in parallel.
-- **Independent verification tasks.** Typecheck, lint, and test suite runs are naturally parallel.
-
-### the hybrid pattern (recommended for medium-to-large codebases)
-
-```
-Phase 1: Parallel read-only triage
-  → Two agents scan the same files with different lenses (security, logic)
-  → Produces a combined shortlist of suspicious areas
-
-Phase 2: Sequential deep audit
-  → One agent reads every file in risk-map order
-  → Uses triage hints to prioritize but scans ALL files
-  → Produces the authoritative issue list
-
-Phase 3: Parallel challenge (if findings split cleanly by directory)
-  → Skeptic A challenges findings in service/auth
-  → Skeptic B challenges findings in service/billing
-  → Merge results
-
-Phase 4: Sequential resolution loop
-  → One agent fixes issues one at a time
-  → Commits after each fix, reverts on failure
-  → Never two writers in the same codebase
-```
-
-### parallel safety rules
-
-- **Read-only agents may run in parallel.** They read files and produce reports. They never modify code.
-- **Writing agents must be sequential.** One writer at a time. Use a lock if the system supports it.
-- **Never merge parallel findings blindly.** After parallel scanning, deduplicate by file + line. If two agents report different issues on the same line, a sequential tiebreaker pass reads the code and decides.
-- **Parallel agents must not share state.** Each agent writes to its own output file. Merging happens after all agents complete.
-- **If a parallel agent fails, the work is not lost.** The successful agent's results stand. Re-run only the failed agent's scope.
-
-### context preservation tactics
-
-Large audits risk losing context as the agent's working memory fills. Mitigate this:
-
-- **Write findings to disk between phases.** Do not carry the full issue list in memory. Read it from disk at the start of each phase.
-- **One domain at a time.** Finish domain A completely before starting domain B. Never interleave.
-- **Checkpoint after each domain.** Write the domain's issue ledger, mark it done, then deliberately "reset" — re-read the next domain's files fresh.
-- **If earlier files are becoming hazy, stop expanding.** Finish the current file thoroughly rather than skimming five more files poorly. Partial coverage with high confidence beats full coverage with low confidence. The loop will cover the rest next iteration.
-- **Persist the risk map.** The structural recon (tier 0) is done once and persisted. Subsequent iterations read it from disk instead of re-scanning.
-- **Use the audit state file as the single source of truth.** Not memory. Not git log. The state file says what is done, what remains, and where to resume.
-
-### decision summary
-
-```
-                    ┌─────────────────────┐
-                    │   Is it read-only?   │
-                    └──────┬──────┬────────┘
-                       YES │      │ NO (writing/fixing)
-                           │      │
-              ┌────────────▼──┐   └──────────────────┐
-              │ Are the scopes │                       │
-              │ independent?   │                       ▼
-              └──┬─────────┬──┘               ALWAYS SEQUENTIAL
-                 │YES      │NO                (one writer at a time)
-                 │         │
-                 ▼         ▼
-            PARALLEL    SEQUENTIAL
-          (safe — no   (must maintain
-          shared state) cross-file context)
-```
+If `scripts/verify.sh` exits non-zero, the change is rejected. Fix the issue or revert.
